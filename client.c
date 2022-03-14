@@ -10,17 +10,17 @@
 
 #define PIPE(p) if( pipe(p) == -1 ){									\
 		fprintf(stderr, "Error while opening pipe: "); perror(NULL);	\
-		return -1;												\
+		return -1;														\
 		}
 
 #define CHKPIDF(pid) if( pid<0){										\
 		fprintf(stderr, "Error during fork: "); perror(NULL);			\
-		return -1;												\
+		return -1;														\
 		}
 		
 #define CHKPIDW(pid) if( pid<0){										\
 		fprintf(stderr, "Error during wait: "); perror(NULL);			\
-		return -1;												\
+		return -1;														\
 		}
 
 #define BIND( id, addr, l) errno=0;				\
