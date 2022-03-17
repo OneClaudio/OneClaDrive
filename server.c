@@ -15,6 +15,11 @@
 
 #include <signal.h>
 
+#include "./comm.h"
+#include "./utils.h"
+#include "./idlist.h"
+#include "./filestorage.h"
+
 #define BIND( id, addr, l) errno=0;				\
 	if( bind( id, addr, l) != 0 ){				\
 		perror("Error: couldnt name socket\n"); \
@@ -28,13 +33,13 @@
 		}
 
 #define WRITE( id, addr, l) errno=0;								\
-	if( write( id, addr, l) <0 ){									\
+	if( writen( id, addr, l) <0 ){									\
 		perror("Error during write\n");								\
 		break;														\
 		}
 
 #define READ( id, addr, l) errno=0;									\
-	if( read( id, addr, l) <0 ){									\
+	if( readn( id, addr, l) <0 ){									\
 		perror("Error during read\n");								\
 		break;														\
 		}
@@ -60,6 +65,9 @@
 	perror(NULL);																			\
 	exit(errno);																			\
 	}
+	
+	
+
 
 #define SPATHNAME "./server_sol"	//Server socket pathname
 
@@ -81,26 +89,173 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 		while( deq(pending, &cid) != 0)				//gets CID from QUEUE
 			usleep(50000);
 		
-		int l;		
-		READ(cid, &l, sizeof(int));
-			
-		char msg[l];		
-		READ(cid, &msg, l);							//READ from the client into local array
+		Cmd cmd;		
+		READ(cid, &cmd, sizeof(Cmd));
 		
-		if( strncmp(msg, "quit", 4) != 0 ){		//if it isnt a QUIT signal
-			for(int i=0; i<l; i++)
-				msg[i]=toupper(msg[i]);				//toupper code just werks
-			msg[l]='\0';
+		int r=0;
 		
-			WRITE(cid, &l, sizeof(int));			//WRITE the result to the client process
-			WRITE(cid, &msg, l);
+		//LOCK
+		switch(cmd->code){
 			
-			WRITE(done, &cid, sizeof(int));			//puts CID on the PIPE for the MANAGER
+			case(OPEN):
+				if(cmd->filename == NULL)
+					//ERROR		(needs filename passed)
+				
+				File* f=getfile(st, cmd->filename);
+				if( FLAG_CREATE(cmd->info)){	
+					if( f!=NULL)
+						//ERROR		(file already existing)
+					
+					f=file_create(cmd->filename);
+					if( f==NULL)
+						//ERROR		(while allocating new file)
+						
+					addnew(st, f);					
+					}
+				else{
+					if( f==NULL)
+						//ERROR		(file not found)
+					}
+				
+				if( openfile(st, f, cid) !=0)
+					//ERROR		(idlist error (unlikely))
+				
+				if( FLAG_LOCK(cmd->info))
+					if( lockfile(st, f, cid) !=0 )
+						//ERROR (file already locked)
+					
+				//SUCCESS
+				break;
+			
+			
+			
+			case(CLOSE):
+				if(cmd->filename == NULL)
+					//ERROR		(needs filename passed)
+
+				File* f=getfile(st, cmd->filename);
+				if( f==NULL)
+					//ERROR		(file not found)
+				
+				if( closefile(st, f, cid) !=0)
+					//ERROR		(cid didnt have file f opened)
+				
+				//SUCCESS
+				break;
+			
+			
+			
+			case(WRITE):
+				if(cmd->filename == NULL)
+					//ERROR		(needs filename passed)
+				
+				File* f=getfile(st, cmd->filename);
+				if( f==NULL)
+					//ERROR		(file not found)
+				
+				//CHECK OPEN
+				//CHECK UNLOCKED 		--> should be CHECK LOCKED by CID
+				//CHECK NEVER WRITTEN (cont==NULL)		--> OVERWRITING not PERMITTED from specific
+				
+				//REPLY OK
+				
+				//READ from CID (SIZE/CONT)
+				
+				writefile(st, f, cont, size);	//this overwrites
+				
+				//SUCCESS
+				break;
+			
+			
+			
+			case(APPEND):
+				//same as write
+				
+				appendtofile(st, f, cont, size);
+				//SUCCESS
+				break;				
+			
+			
+			
+			case(READ):
+				if(cmd->filename == NULL)			//TODO /!\ if no FILENAME could be READN! (maybe better to handle separately)
+					//ERROR
+				
+				File* f=getfile(st, cmd->filename);
+				if( f==NULL)
+					//ERROR		(file not found)
+				
+				//CHECK OPEN
+				//CHECK UNLOCKED
+				
+				readfile(st, f, &cont, &size);
+				
+				//WRITE to CID (SIZE/CONT)
+				
+				//SUCCESS
+				break;
+			
+			
+			
+			case(READN):
+			
+				break;			
+		
+		
+		
+			case(REMOVE):
+				if(cmd->filename == NULL)
+					//ERROR
+				File* f=getfile(st, cmd->filename);
+				if( f==NULL)
+					//ERROR		(file not found)
+					
+				//CHECK OPEN
+				//CHECK UNLOCKED	--> should be CHECK LOCKED by CID
+				
+				rmv(st, f);<
+				
+				//WRITE to CID (SIZE/CONT)
+				
+				file_destroy(f);
+				//SUCCESS
+				break;
+				
+				
+				
+			case(LOCK):
+				if(cmd->filename == NULL)
+					//ERROR
+
+				File* f=getfile(st, cmd->filename);
+				if( f==NULL)
+					//ERROR		(file not found)
+				
+				if( lockfile(st, f, cid) !=0)
+					//ERROR		(cid didnt have file f opened)
+				
+				//SUCCESS
+				break;
+			
+			case(UNLOCK):
+				if(cmd->filename == NULL)
+					//ERROR
+
+				File* f=getfile(st, cmd->filename);
+				if( f==NULL)
+					//ERROR		(file not found)
+				
+				if( unlockfile(st, f, cid) !=0)
+					//ERROR		(cid didnt have file f opened)
+				
+				//SUCCESS
+				break;
+				
+			default:
+				fprintf(stderr, "Come sei finito qui? cmd code: %d\n", cmd->code);
+				break;		
 			}
-		else{									//if it is a QUIT signal doesnt return the CID and CLOSES it instead
-			printf("Closing connection with client\n");
-			close(cid);
-			}
+		//UNLOCK
 		}
 	}
 
