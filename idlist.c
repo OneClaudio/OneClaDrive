@@ -17,19 +17,19 @@
 	pthread_exit((void*)EXIT_FAILURE);				    								\
 	}
 
-typedef struct node{			//LIST NODE	contains:
+typedef struct IdNode{			//LIST IDNODE	contains:
     int id;							//FILE DESCRIPTOR
-    struct node* prev;				// ptr to PREVIOUS node
-	} node;
+    struct IdNode* prev;				// ptr to PREVIOUS IdNode
+	} IdNode;
 
-typedef struct idlist{			//THREAD SAFE LIST type
-    node* first;					
-    node* last;							// x-[ ]<-[ ]<-[ ]<-[ ]<-[ ]
+typedef struct IdList{			//THREAD SAFE LIST type
+    IdNode* first;					
+    IdNode* last;							// x-[ ]<-[ ]<-[ ]<-[ ]<-[ ]
     pthread_mutex_t mutex;				//    ^					  ^
-	} idlist;							//   first				last
+	} IdList;							//   first				last
 
-idlist* idlist_create(){			//allocates a new THREAD SAFE LIST
-    idlist* list=malloc(sizeof(idlist));
+IdList* idListCreate(){			//allocates a new THREAD SAFE LIST
+    IdList* list=malloc(sizeof(IdList));
     if(list==NULL) return NULL;						//on ERROR:		returns NULL
 
     list->first = NULL;
@@ -39,11 +39,11 @@ idlist* idlist_create(){			//allocates a new THREAD SAFE LIST
     return list;									//on SUCCESS:	returns a ptr to the T SAFE LIST
 	}
 	
-int enq(idlist* list, int id){			//ENQ( list, val) adds node with id val in first position in the list
-    node* new=malloc(sizeof(struct node));				//ENQUEUE used by MANAGER THREAD to give a CIDto the worker threads
+int enqId(IdList* list, int id){			//enqId( list, val) adds node with id val in first position in the list
+    IdNode* new=malloc(sizeof(struct IdNode));				//ENQUEUE used by MANAGER THREAD to give a CIDto the worker threads
     if(new==NULL){
     	errno=ENOMEM;
-    	fprintf(stderr,"Error: malloc inside idlist enq() call\n");
+    	fprintf(stderr,"Error: malloc inside IdList enqId() call\n");
     	return -1;
     	}
     new->id=id;
@@ -69,7 +69,7 @@ int enq(idlist* list, int id){			//ENQ( list, val) adds node with id val in firs
     return 0;
 	}
 
-int deq(idlist* list, int* id){			//DEQ( list, valptr) stores the last element id in id and deletes the last node
+int deqId(IdList* list, int* id){			//deqId( list, valptr) stores the last element id in id and deletes the last node
 														//DEQUEUE used bu WORKER THREADS to fetch a CID (client file desc)
 /*	while(1){
 		usleep(10000);
@@ -77,7 +77,7 @@ int deq(idlist* list, int* id){			//DEQ( list, valptr) stores the last element i
     	} */
     LOCK(&list->mutex);
 	
-    node* curr=list->last;
+    IdNode* curr=list->last;
     
 	if(curr == NULL){								//if the LIST is empty exits with a code <--
         UNLOCK(&list->mutex);							//LIST EMPTY
@@ -98,14 +98,14 @@ int deq(idlist* list, int* id){			//DEQ( list, valptr) stores the last element i
     return 0;										//if the LIST wasnt empty exits with 0 <--
 	}
 
-int find(idlist* list, int id){
+int findId(IdList* list, int id){
 
     LOCK(&list->mutex);
     
-    node* curr=list->last;
+    IdNode* curr=list->last;
     int found=0;
     
-    while(curr!=NULL || found==0){
+    while(curr!=NULL && found==0){
     	if( curr->id == id ){
     		found=1;
     		break;
@@ -119,10 +119,10 @@ int find(idlist* list, int id){
     else return 0;    				//0 otherwise
     }
 
-int findrmv(idlist* list, int id){
+int findRmvId(IdList* list, int id){
     LOCK(&list->mutex);
 	
-	node* curr=list->last;
+	IdNode* curr=list->last;
 	int found=0;
 	
 	if(curr == NULL){				//if the LIST is empty exits with a code <--
@@ -131,10 +131,9 @@ int findrmv(idlist* list, int id){
     	}
 	
 	int unused;
-	if( curr->id == id){			//if the node to remove is the last, the DEQ can handle it
+	if( curr->id == id){			//if the node to remove is the last, the deqId can handle it
 		UNLOCK(&list->mutex);
-		deq(list, &unused);
-		return 0;
+		return deqId(list, &unused);
 		}
 	
 	while(curr->prev != NULL || found==0 ){
@@ -147,7 +146,7 @@ int findrmv(idlist* list, int id){
 		}
 
 	if(found){
-		node* victim=curr->prev;
+		IdNode* victim=curr->prev;
 		if(victim == list->first){		//if the VICTIM is the FIRST in the list, CURR becomes the FIRST
 			list->first=curr;
 			curr->prev=NULL;
@@ -165,10 +164,10 @@ int findrmv(idlist* list, int id){
 		}
 	}
 
-int idlist_destroy(idlist* list){		//dealocates a THREAD SAFE LIST
+int idListDestroy(IdList* list){		//dealocates a THREAD SAFE LIST
 	
 	int unused;
-	while( deq( list, &unused)==0);
+	while( deqId( list, &unused)==0);
 		//printf("list still full, removed %d\n", unused);
 
 	pthread_mutex_destroy(&list->mutex);
@@ -178,8 +177,8 @@ int idlist_destroy(idlist* list){		//dealocates a THREAD SAFE LIST
 
 //TEST MAIN
 /*
-void idlist_print(idlist* queue){
-	node* curr=queue->last;
+void IdList_print(IdList* queue){
+	IdNode* curr=queue->last;
 	while( curr!=NULL){
 		
 		printf(" %d |", curr->id);
@@ -191,31 +190,31 @@ void idlist_print(idlist* queue){
 // main() - funzione main
 int main(){
     // creo la coda
-    idlist* l = idlist_create();
+    IdList* l = idListCreate();
 
     // aggiungo un po' di elementi
-    enq(l, 1);	idlist_print(l);    
-    enq(l, 2);  idlist_print(l);    
-    enq(l, 8);  idlist_print(l);    
-    enq(l, 4);  idlist_print(l);
-    enq(l, 7);	idlist_print(l);
+    enqId(l, 1);	IdList_print(l);    
+    enqId(l, 2);  IdList_print(l);    
+    enqId(l, 8);  IdList_print(l);    
+    enqId(l, 4);  IdList_print(l);
+    enqId(l, 7);	IdList_print(l);
     
     
-    findrmv(l, 8);	idlist_print(l);
-    findrmv(l, 1);	idlist_print(l);
-    findrmv(l, 7);	idlist_print(l);
+    findRmvId(l, 8);	IdList_print(l);
+    findRmvId(l, 1);	IdList_print(l);
+    findRmvId(l, 7);	IdList_print(l);
     
-    if( find(l,2) ) printf("2 trovato\n");
-    if( find(l,4) ) printf("4 trovato\n");
+    if( findId(l,2) ) printf("2 trovato\n");
+    if( findId(l,4) ) printf("4 trovato\n");
     
-    findrmv(l,2);	idlist_print(l);
-    findrmv(l,4);	idlist_print(l);
+    findRmvId(l,2);	IdList_print(l);
+    findRmvId(l,4);	IdList_print(l);
     	
-	enq(l, 4);   idlist_print(l); 
-	enq(l,2);   idlist_print(l);
+	enqId(l, 4);   IdList_print(l); 
+	enqId(l,2);   IdList_print(l);
 
     printf("EXITING\n");
-    idlist_destroy(l);
+    idListDestroy(l);
 
     return 0;
 	}	*/

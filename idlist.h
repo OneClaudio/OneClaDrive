@@ -1,22 +1,22 @@
-typedef struct node{			//LIST NODE	contains:
+typedef struct IdNode{			//LIST NODE	contains:
     int id;							//FILE DESCRIPTOR
-    struct node* prev;				// ptr to PREVIOUS node
-	} node;
+    struct IdNode* prev;				// ptr to PREVIOUS node
+	} IdNode;
 
-typedef struct idlist{			//THREAD SAFE LIST type
-    node* first;					
-    node* last;							// x-[ ]<-[ ]<-[ ]<-[ ]<-[ ]
-    pthread_mutex_t mutex;				//    ^					  ^
-	} idlist;							//   first				last
+typedef struct IdList{			//THREAD SAFE LIST type
+    IdNode* first;					
+    IdNode* last;							// x-[ ]<-[ ]<-[ ]<-[ ]<-[ ]
+    pthread_mutex_t mutex;					//    ^					  ^
+	} IdList;								//   first				last
 	
-idlist* idlist_create();
+IdList* idListCreate();
 
-int enq(idlist* list, int id);
+int enqId(IdList* list, int id);
 
-int deq(idlist* list, int* id);
+int deqId(IdList* list, int* id);
 
-int find(idlist* list, int id);
+int findId(IdList* list, int id);
 
-int findrmv(idlist* list, int id);
+int findRmvId(IdList* list, int id);
 
-int idlist_destroy(idlist* list);
+int idListDestroy(IdList* list);

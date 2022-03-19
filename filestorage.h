@@ -1,4 +1,4 @@
-
+	
 typedef struct File{
 	char*  name;
     void*  cont;
@@ -6,16 +6,16 @@ typedef struct File{
     
     //pthread_rwlock_t flock;
     
-    idlist*	openIds;
+    IdList*	openIds;
     int 	lockId;
     
     struct File* prev;
        
     } File;
 
-File* file_create(char* filename){
+File* fileCreate(char* filename);
 
-void file_destroy(File* victim){
+void fileDestroy(File* victim);
 
 
 
@@ -24,37 +24,41 @@ typedef struct Storage{		//THREAD SAFE STORAGE type
     File* first;
     File* last;
     
-	pthread_rwlock_t stlock;
+	pthread_rwlock_t lock;
 	
 	size_t numfiles;
 	size_t capacity;
 	
 	} Storage;
 	
-Storage* storage_create();
+extern Storage* storage;	//GLOBAL STORAGE DECLARATION
 
-void storage_destroy(Storage* storage);
+int storageCreate();
 
-
-
-
-int addnew(Storage* storage, File* new);
-
-File* rmvlast(Storage* storage);
-
-File* getfile(Storage* storage, char* filename);
+void storageDestroy();
 
 
 
 
-void writefile( Storage* storage, File* file, void* cont, size_t size);
+int addNewFile(File* new);
 
-void readfile( Storage* storage, File* file, void** cont, size_t* size);
+File* rmvLastFile();
 
-int openfile( Storage* storage, File* file, int cid);
+File* getFile(char* filename);
 
-int closefile( Storage* storage, File* file, int cid);
+int rmvThisFile(File* victim);
 
-int lockfile( Storage* storage, File* file, int cid);
 
-int unlockfile( Storage* storage, File* file, int cid);
+
+
+void writefile( File* file, void* cont, size_t size);
+
+void readfile( File* file, void** cont, size_t* size);
+
+int openfile( File* file, int cid);
+
+int closefile( File* file, int cid);
+
+int lockfile( File* file, int cid);
+
+int unlockfile( File* file, int cid);

@@ -4,42 +4,13 @@
 #include <unistd.h>
 #include <errno.h>
 #include <string.h>
+#include <limits.h>
 
 #include "./idlist.h"
+#include "./comm.h"
+#include "./filestorage.h"
 
-/*
-#define LOCK(l)      if (pthread_mutex_lock(l) != 0){									\
-	fprintf(stderr, "Error during lock: '%s' at %s:%d\n", #l, __FILE__, __LINE__);		\
-	perror(NULL);																		\
-    pthread_exit((void*)EXIT_FAILURE);			   										\
-  	}
-  	
-#define TRYLOCK(l)	pthread_mutex_trylock(l)
-  	
-#define UNLOCK(l)    if (pthread_mutex_unlock(l) != 0){									\
-	fprintf(stderr, "Error during unlock: '%s' at %s:%d\n", #l, __FILE__, __LINE__);	\
-	perror(NULL);																		\
-	pthread_exit((void*)EXIT_FAILURE);				    								\
-	}	*/
-	
-#define RDLOCK(l)      if (pthread_rwlock_rdlock(l) != 0){								\
-	fprintf(stderr, "Error during rdlock: '%s' at %s:%d\n", #l, __FILE__, __LINE__);	\
-	perror(NULL);																		\
-    pthread_exit((void*)EXIT_FAILURE);			   										\
-  	}
-
-#define WRLOCK(l)      if (pthread_rwlock_wrlock(l) != 0){								\
-	fprintf(stderr, "Error during wrlock: '%s' at %s:%d\n", #l, __FILE__, __LINE__);	\
-	perror(NULL);																		\
-    pthread_exit((void*)EXIT_FAILURE);			   										\
-  	}
- 
-#define UNLOCK(l)      if (pthread_rwlock_unlock(l) != 0){								\
-	fprintf(stderr, "Error during unlock: '%s' at %s:%d\n", #l, __FILE__, __LINE__);	\
-	perror(NULL);																		\
-    pthread_exit((void*)EXIT_FAILURE);			   										\
-  	}
-
+/*	
 typedef struct File{
 	char*  name;
     void*  cont;
@@ -47,7 +18,7 @@ typedef struct File{
     
     //pthread_rwlock_t flock;
     
-    idlist*	openIds;
+    IdList*	openIds;
     int 	lockId;
     
     struct File* prev;
@@ -63,13 +34,13 @@ typedef struct Storage{		//THREAD SAFE STORAGE type
 	size_t numfiles;
 	size_t capacity;
 	
-	} Storage;
+	} Storage;	*/
 	
-File* file_create(char* filename){
+File* fileCreate(char* filename){
 	File* new=malloc(sizeof(File));
     if(new==NULL){
     	errno=ENOMEM;
-    	fprintf(stderr,"Error: malloc inside storage addnew() call\n");
+    	fprintf(stderr,"Error: malloc inside storage addNewFile() call\n");
     	return NULL;
     	}
     
@@ -78,8 +49,8 @@ File* file_create(char* filename){
 	new->name=strndup( filename, strlen(filename) );
 	new->cont=NULL;
 	new->size=0;
-	new->openIds=idlist_create();
-	new->lockId=0;
+	new->openIds=idListCreate();
+	new->lockId=-1;
     
     //pthread_rwlock_init(&new->flock, NULL);
     
@@ -88,17 +59,17 @@ File* file_create(char* filename){
     return new;
     }
 
-void file_destroy(File* victim){
+void fileDestroy(File* victim){
 	free(victim->name);
 	if(victim->cont) free(victim->cont);
-	idlist_destroy(victim->openIds);
+	idListDestroy(victim->openIds);
 	//pthread_rwlock_destroy(&victim->flock);
 	free(victim);
 	}
 
-Storage* storage_create(){			//allocates a new THREAD SAFE STORAGE
-    Storage* storage=malloc(sizeof(Storage));
-    if(storage==NULL) return NULL;					//on ERROR:		returns NULL
+int storageCreate(){			//allocates a new THREAD SAFE STORAGE
+    storage=malloc(sizeof(Storage));
+    if(storage==NULL) return -1;					//on ERROR:		returns NULL
 
     storage->first = NULL;
     storage->last  = NULL;
@@ -106,12 +77,12 @@ Storage* storage_create(){			//allocates a new THREAD SAFE STORAGE
     storage->numfiles=0;
     storage->capacity=0;
     
-    pthread_rwlock_init(&storage->stlock, NULL);
+    pthread_rwlock_init(&storage->lock, NULL);
     
-    return storage;									//on SUCCESS:	returns a ptr to the STORAGE
+    return 0;									//on SUCCESS:	returns a ptr to the STORAGE
 	}
 
-void storage_destroy(Storage* storage){		//deallocates a STORAGE
+void storageDestroy(){		//deallocates a STORAGE
 
 	File* curr=storage->last;
 	
@@ -120,15 +91,15 @@ void storage_destroy(Storage* storage){		//deallocates a STORAGE
 	while( curr!=NULL){
 		prev=curr->prev;
 		printf("Deleting '%s'\n", curr->name);
-		file_destroy(curr);
+		fileDestroy(curr);
 		curr=prev;
 		}	
 	
-	pthread_rwlock_destroy(&storage->stlock);			//TODO
+	pthread_rwlock_destroy(&storage->lock);			//TODO
 	free(storage);
 	}
 	
-int addnew(Storage* storage, File* new){
+int addNewFile( File* new){
 
     //WRLOCK(&storage->stlock);						//shield storage ptrs from other threads
 
@@ -148,7 +119,7 @@ int addnew(Storage* storage, File* new){
     return 0;									//SUCCESS
 	}
 
-File* rmvlast(Storage* storage){	//RMVLAST( storage, victim) removes the LAST file from STORAGE to make room
+File* rmvLastFile(){	//rmvLastFile( storage, victim) removes the LAST file from STORAGE to make room
 														//its not deallocated but only passed to the thread via VICTIM ptr
     //WRLOCK(&storage->stlock);
 	
@@ -172,7 +143,7 @@ File* rmvlast(Storage* storage){	//RMVLAST( storage, victim) removes the LAST fi
     return victim;										//if the STORAGE wasnt empty exits with 0 <--
 	}
 	
-File* getfile(Storage* storage, char* filename){
+File* getFile( char* filename){
 	
 	//RDLOCK(&storage->stlock);
     File* curr=storage->last;
@@ -200,12 +171,12 @@ File* getfile(Storage* storage, char* filename){
     else return NULL;    				//NULL otherwise
 	}
 
-void rmv(Storage* storage, File* victim){
+int rmvThisFile( File* victim){
 	
     File* curr=storage->last;
 	
-	if( curr==victim ){					//if the VICTIM is the last, the DEQ can handle it
-		rmvlast(storage);					//return ptr discarded, who caresb
+	if( curr==victim ){					//if the VICTIM is the lathe deqId can handle it
+		rmvLastFile(storage);					//return ptr discarded, who caresb
 		return;
 		}
 	
@@ -214,7 +185,7 @@ void rmv(Storage* storage, File* victim){
 		curr=curr->prev;
 		}
 	
-	if(victim == storage->first){		//if the VICTIM is the FIRST in the list, CURR becomes the FIRST
+	if(victim == storage->first){		//if the VICTIM is the FIRST in the list CURR becomes the FIRST
 		storage->first=curr;
 		curr->prev=NULL;
 		}
@@ -222,44 +193,13 @@ void rmv(Storage* storage, File* victim){
 	
 	storage->numfiles--;
 	storage->capacity -= victim->size;
+	return 0;
 	}
 
-/*
-File* getrmv(Storage* storage, char* filename){
-	
-    File* curr=storage->last;
-	int found=0;
-	
-	if( curr == NULL )				//if the LIST is empty exits with a code <--
-		return NULL;					//LIST EMPTY
-	
-	if( strncmp(curr->name, filename, strlen(filename)) )			//if the node to remove is the last, the DEQ can handle it
-		return rmvlast(storage);
-	
-	while(curr->prev != NULL || found==0 ){
-		if( strncmp(curr->prev->name, filename, strlen(filename)) ){
-			found=1;					//when ID is found CURR is the NODE before it
-			break;
-			}
-		curr=curr->prev;
-		}
-	
-	if(found){
-		File* victim=curr->prev;
-		
-		if(victim == storage->first){		//if the VICTIM is the FIRST in the list, CURR becomes the FIRST
-			storage->first=curr;
-			curr->prev=NULL;
-			}
-		else curr->prev=victim->prev;	////otherwise VICTIM is skipped
-		
-		return victim;						//0 successful remove
-		}
-	else return NULL;						//NOT FOUND
-	}
-*/
+/*------------------------------------------------------API----------------------------------------------------------*/	
+/*-------------------------------------------------------------------------------------------------------------------*/
 
-void writefile( Storage* storage, File* file, void* cont, size_t size){
+void writefile( File* file, void* cont, size_t size){
 	
 	file->cont=cont;
 	file->size+=size;
@@ -269,35 +209,37 @@ void writefile( Storage* storage, File* file, void* cont, size_t size){
 	
 //TODO APPEND
 
-void readfile( Storage* storage, File* file, void** cont, size_t* size){
+void readfile( File* file, void** cont, size_t* size){
 	*size=file->size;
     *cont=malloc(*size);
     memcpy(*cont, file->cont, file->size);
 	}
 
-int openfile( Storage* storage, File* file, int cid){
-	return enq(file->openIds, cid);
+int openfile( File* file, int cid){
+	if( findId(file->openIds, cid) ) return ALROPEN;	//ERR: cid has already opened this file		//TODO differentiate logic errors from malloc/read errors
+	
+	return enqId(file->openIds, cid);
 	}
 
-int closefile( Storage* storage, File* file, int cid){
-	return findrmv(file->openIds, cid);
+int closefile( File* file, int cid){
+	return findRmvId(file->openIds, cid);
 	}
 	
-int lockfile( Storage* storage, File* file, int cid){
+int lockfile( File* file, int cid){
 	if( file->lockId != 0) return -1;
 	
 	file->lockId=cid;
 	return 0;
 	}
 	
-int unlockfile( Storage* storage, File* file, int cid){
+int unlockfile( File* file, int cid){
 	if( file->lockId != cid) return -1;
 	
-	file->lockId=0;
+	file->lockId=-1;
 	return 0;
 	}
 
-void storage_print(Storage* storage){
+void storagePrint(){
 	File* curr=storage->last;
 	while( curr!=NULL){
 		printf(" %s |", curr->name);
@@ -306,44 +248,45 @@ void storage_print(Storage* storage){
 	printf("\n");
 	}
 
+/*
 int main(){
 	
-	Storage* st=storage_create();
+	storageCreate();
 
 	do{		
-		File* f1=file_create("file1");		
-		addnew(st, f1);
+		File* f1=fileCreate("file1");		
+		addNewFile(f1);
 		
-		storage_print(st);
+		storagePrint();
 	
-		File* f2=file_create("file2");
-		addnew(st, f2);	
+		File* f2=fileCreate("file2");
+		addNewFile(f2);	
 		
-		storage_print(st);
+		storagePrint();
 	}while(0);
 	
 	do{
-		File* f1=getfile(st,"file1");
+		File* f1=getFile("file1");
 		if (f1==NULL) break;
 		int cid=4;
 		
 		printf("found file %s\n", f1->name);
 		
-		openfile(st, f1, cid);
-		if( find(f1->openIds, cid) ) printf("%d succ opnd file f1\n", cid);
+		openfile(f1, cid);
+		if( findId(f1->openIds, cid) ) printf("%d succ opnd file f1\n", cid);
 		
-		lockfile(st, f1, cid);
+		lockfile(f1, cid);
 		printf("%d has lockd f1\n", f1->lockId);
 		
 		char* buf=strdup("ALLAH is great!");
-		writefile( st, f1, buf, strlen(buf)+1 );
+		writefile( f1, buf, strlen(buf)+1 );
 		
 		printf("f1 now contains: %s\n", (char*)f1->cont);
 		
 	} while(0); 
 	
 	do{
-		File* f1=getfile(st,"file1");
+		File* f1=getFile("file1");
 		if(f1==NULL) break;
 		
 		int cid=4;
@@ -351,7 +294,7 @@ int main(){
 		size_t size;
 		
 		if( f1->lockId==cid)
-			readfile(st, f1, &buf, &size);
+			readfile(f1, &buf, &size);
 
 		printf("read from f1: %s\n", (char*)buf);	//TODO
 		
@@ -359,24 +302,24 @@ int main(){
 		
 		printf("cont of f1 intact: %s\n", (char*)f1->cont);
 		
-		unlockfile(st, f1, cid);
-		closefile(st, f1, cid);	
+		unlockfile(f1, cid);
+		closefile(f1, cid);	
 		
 	}while(0);
 	
-	storage_print(st);
+	storagePrint();
 	
-	File* ftrash=getfile(st, "file1");
-	rmv(st, ftrash);
-	file_destroy(ftrash);
+	File* ftrash=getFile("file1");
+	rmvThisFile(ftrash);
+	fileDestroy(ftrash);
 	
-	storage_print(st);
+	storagePrint();
 	
-	ftrash=rmvlast(st);
-	file_destroy(ftrash);
+	ftrash=rmvLastFile();
+	fileDestroy(ftrash);
 	
-	storage_print(st);
-	storage_destroy(st);
+	storagePrint();
+	storageDestroy();
 	
 	return 0;
-	}
+	}	*/
