@@ -1,4 +1,5 @@
-	
+#include <pthread.h>
+
 typedef struct File{
 	char*  name;
     void*  cont;
@@ -31,11 +32,13 @@ typedef struct Storage{		//THREAD SAFE STORAGE type
 	
 	} Storage;
 	
-extern Storage* storage;	//GLOBAL STORAGE DECLARATION
+Storage* storage;	//GLOBAL STORAGE DECLARATION
 
 int storageCreate();
 
 void storageDestroy();
+
+void storagePrint();
 
 
 

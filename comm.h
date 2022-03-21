@@ -1,3 +1,6 @@
+
+#include <linux/limits.h>	//PATH_MAX
+
 typedef enum CmdCode{
 	OPEN	,
 	CLOSE	,

@@ -37,7 +37,7 @@ typedef struct Storage{		//THREAD SAFE STORAGE type
 	} Storage;	*/
 	
 File* fileCreate(char* filename){
-	File* new=malloc(sizeof(File));
+	File* new=calloc(1,sizeof(File));
     if(new==NULL){
     	errno=ENOMEM;
     	fprintf(stderr,"Error: malloc inside storage addNewFile() call\n");
@@ -46,7 +46,7 @@ File* fileCreate(char* filename){
     
     
     
-	new->name=strndup( filename, strlen(filename) );
+	new->name=strdup( filename);
 	new->cont=NULL;
 	new->size=0;
 	new->openIds=idListCreate();
@@ -68,7 +68,7 @@ void fileDestroy(File* victim){
 	}
 
 int storageCreate(){			//allocates a new THREAD SAFE STORAGE
-    storage=malloc(sizeof(Storage));
+    storage=calloc(1,sizeof(Storage));
     if(storage==NULL) return -1;					//on ERROR:		returns NULL
 
     storage->first = NULL;
@@ -103,7 +103,7 @@ int addNewFile( File* new){
 
     //WRLOCK(&storage->stlock);						//shield storage ptrs from other threads
 
-    if (storage->first==NULL){						//if STORAGE EMPTY first and last point to the new element
+    if (storage->first==NULL || storage->last==NULL){	//if STORAGE EMPTY first and last point to the new element
         storage->first=new;
         storage->last=new;
     	}
@@ -156,7 +156,7 @@ File* getFile( char* filename){
     	//RDLOCK(&curr->flock);
     	if(curr==NULL) break;
     	
-    	if( strncmp(curr->name, filename, strlen(filename)) ){
+    	if( strcmp(curr->name, filename /*, strlen(filename)*/) == 0){
     		//UNLOCK(&curr->flock);
     		found=1;    				
     		break;
@@ -175,9 +175,10 @@ int rmvThisFile( File* victim){
 	
     File* curr=storage->last;
 	
-	if( curr==victim ){					//if the VICTIM is the lathe deqId can handle it
-		rmvLastFile(storage);					//return ptr discarded, who caresb
-		return;
+	if( storage->last==victim ){		//if the VICTIM is the last the removeLastFile() can handle it
+		rmvLastFile();							//Return ptr discarded bc its equal to victim	
+		free(victim);
+		return 0;
 		}
 	
 	while(1){
@@ -193,56 +194,14 @@ int rmvThisFile( File* victim){
 	
 	storage->numfiles--;
 	storage->capacity -= victim->size;
-	return 0;
-	}
-
-/*------------------------------------------------------API----------------------------------------------------------*/	
-/*-------------------------------------------------------------------------------------------------------------------*/
-
-void writefile( File* file, void* cont, size_t size){
-	
-	file->cont=cont;
-	file->size+=size;
-	
-	storage->capacity+=size;
-	}
-	
-//TODO APPEND
-
-void readfile( File* file, void** cont, size_t* size){
-	*size=file->size;
-    *cont=malloc(*size);
-    memcpy(*cont, file->cont, file->size);
-	}
-
-int openfile( File* file, int cid){
-	if( findId(file->openIds, cid) ) return ALROPEN;	//ERR: cid has already opened this file		//TODO differentiate logic errors from malloc/read errors
-	
-	return enqId(file->openIds, cid);
-	}
-
-int closefile( File* file, int cid){
-	return findRmvId(file->openIds, cid);
-	}
-	
-int lockfile( File* file, int cid){
-	if( file->lockId != 0) return -1;
-	
-	file->lockId=cid;
-	return 0;
-	}
-	
-int unlockfile( File* file, int cid){
-	if( file->lockId != cid) return -1;
-	
-	file->lockId=-1;
+	free(victim);
 	return 0;
 	}
 
 void storagePrint(){
 	File* curr=storage->last;
 	while( curr!=NULL){
-		printf(" %s |", curr->name);
+		printf("'%s'\n", curr->name);
 		curr=curr->prev;
 		}
 	printf("\n");

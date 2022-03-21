@@ -92,7 +92,7 @@ int deqId(IdList* list, int* id){			//deqId( list, valptr) stores the last eleme
     UNLOCK(&list->mutex);
     
     *id = curr->id;							//the id of the EXTRACTED NODE is read and then freed
-	//printf("Dequeueing %d\n", *id);	//DeBuG
+	printf("Dequeueing %d\n", *id);	//DeBuG
     free(curr);
     
     return 0;										//if the LIST wasnt empty exits with 0 <--

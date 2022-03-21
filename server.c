@@ -8,6 +8,8 @@
 #include <ctype.h>			//toupper()
 #include <sys/select.h>
 #include <pthread.h>
+#include <linux/limits.h>	//PATH_MAX
+#include <stdbool.h>
 
 #include <sys/stat.h>
 #include <sys/types.h>
@@ -19,6 +21,7 @@
 #include "./utils.h"
 #include "./idlist.h"
 #include "./filestorage.h"
+#include "./errcheck.h"
 
 /*
 #define BIND( id, addr, l) errno=0;				\
@@ -43,16 +46,6 @@
 	if( readn( id, addr, l) <0 ){									\
 		perror("Error during read\n");								\
 		break;														\
-		}
-
-#define ACCEPT( cid, sid, addr, l) errno=0;					\
-	cid=accept( sid, addr, l);								\
-	if(cid<0){												\
-		if( errno==EAGAIN) continue;						\
-		else{												\
-			perror("Error: accept of client failed\n");		\
-			break;											\
-			}												\
 		}
 
 #define CREATE( t, att, f, arg)		if(pthread_create( t, att, f, arg) != 0){				\
@@ -85,8 +78,32 @@
     pthread_exit((void*)EXIT_FAILURE);			   										\
   	}
 */
+
+#define WRITE( id, addr, size){										\
+		ErrNEG1( writefull(id, addr, size)  );						\
+	/*	ErrDIFF( write(),  size);	//optional strict version */	\
+		}
+		
+#define READ( id, addr, size){										\
+		ErrNEG1( readfull(id, addr, size)  );						\
+	/*	ErrDIFF( read(),  size);	//optional strict version */	\
+		}
+
+#define CREATE( t, att, f, arg){									\
+		ErrNEG1(  pthread_create( t, att, f, arg)  );			\
+		}	
+
+#define ACCEPT( cid, sid, addr, l) errno=0;					\
+	cid=accept( sid, addr, l);								\
+	if(cid<0){												\
+		if( errno==EAGAIN) continue;						\
+		else ErrFAIL;										\
+		}
+
 #define REPLY( MSG ){						\
-	Reply reply=MSG;								\
+	Reply reply;							\
+	memset( &reply, 0, sizeof(Reply) );		\
+	reply=MSG;								\
 	WRITE( cid, &reply, sizeof(Reply) );	\
 	}
 
@@ -100,82 +117,126 @@ pthread_t tid[MAXTHREADS-1];		//WORKER THREADS
 
 
 
-queue_tsafe* pending;	//thread safe QUEUE for fds rdy for the worker threads		M -> WTs
+IdList* pending;	//thread safe QUEUE for fds rdy for the worker threads		M -> WTs
 int done;				//named PIPE for fds finished by the worker threads		  WTs -> M
+
+Storage* storage;
 
 volatile sig_atomic_t quit=0;		//QUIT SIGNAL handler
 void sighandler(int unused){
     quit=1;
 	}
+	
+/*---------------------------------------------------WORKER----------------------------------------------------------*/	
+/*-------------------------------------------------------------------------------------------------------------------*/
 
 void* work(void* unused){			//ROUTINE of WORKER THREADS
+	
 	while(1){
-		int cid;
+		int cid=-1;
 		
-		while( deq(pending, &cid) != 0)				//gets CID from QUEUE
+		while( deqId(pending, &cid) != 0) //TODO	//gets CID from QUEUE
 			usleep(50000);
 		
-		Cmd cmd;		
+		//printf("Got CID!\n");
+		
+		Cmd cmd;
+		memset( &cmd, 0, sizeof(Cmd) );	
 		READ(cid, &cmd, sizeof(Cmd));
+		//printf("Got CMD\n");
 		
 		bool quit=false;
 		
 		//Reply reply;
 		
-		ErrNZERO(  pthread_rwlock_wrlock(storage->lock)  );
+		ErrNZERO(  pthread_rwlock_wrlock(&storage->lock)  );
 		
-		switch(cmd->code){
+		switch(cmd.code){
 			
-			case(OPEN):
-			/*	if(cmd->filename == NULL)	//Already checked in API call//  */
-								
-				File* f=getFile(cmd->filename);
+			case (OPEN):{
+ErrLOCAL
+			/*	if(cmd.filename == NULL)	//Already checked in API call//  */
+				printf("starting OPEN file '%s'\n", cmd.filename);
+						
+				File* f=getFile(cmd.filename);
+
 				
-				if( cmd->info & O_CREATE ){					//Client requested an O_CREATE openFile()
+				if( cmd.info & O_CREATE ){					//Client requested an O_CREATE openFile()
 					
 					if( f!=NULL){								//ERR: file already existing
 						REPLY(EXISTS);
 						break;
 						}
 						
-					ErrNULL(  f=fileCreate(cmd->filename)  );	//ERR:	fatal malloc error while allocating space for new file (ENOMEM)
+					ErrNULL(  f=fileCreate(cmd.filename)  );	//ERR:	fatal malloc error while allocating space for new file (ENOMEM)
 						
-					ErrNEG1(  addNewFile(st, f)  );				//Successful CREATION	
+					ErrNEG1(  addNewFile(f)  );				//Successful CREATION	
 					}	
 				else{										//Client requested a normal openFile()
 					if( f==NULL){ REPLY(NOTFOUND); break; }		//ERR: file not already existing/not found
 					}
 				
 				if( findId(f->openIds, cid) ) REPLY(ALROPEN);	
-				ErrNEG1(  enqId(file->openIds, cid)  );				//Successful OPEN
+				ErrNEG1(  enqId(f->openIds, cid)  );				//Successful OPEN
 				
-				if( cmd->info & O_LOCK ){
+				if( cmd.info & O_LOCK ){
 					if( f->lockId!=-1 && f->lockId!=cid ){ REPLY(LOCKED); break; }
 					else f->lockId=cid;			//Successful LOCK
 					}
 					
 				REPLY(OK);
+				
+				if( storage->numfiles == MAXNUMFILES ){
+					REPLY(CACHE);
+					
+					File* victim=NULL;
+					ErrNULL( victim=rmvLastFile() );
+					
+					WRITE(cid, &victim->size, sizeof(size_t));
+					WRITE(cid, victim->cont, victim->size );
+					
+					fileDestroy( victim );					
+					}
+					
+				REPLY(OK);
+				printf("done OPEN file '%s'\n", cmd.filename);
+
+				break;
+ErrCLEANUP
+				exit(EXIT_FAILURE);
+ErrCLEAN
+				}
 				break;
 					
 			
 			
 			
-			case(CLOSE):
-				File* f=getFile(cmd->filename);
+			case (CLOSE):{
+ErrLOCAL		
+				printf("CLOSE file '%s'\n", cmd.filename);
+				File* f=getFile(cmd.filename);
 				if( f==NULL){				//ERR: file not found
 						REPLY(NOTFOUND);
 						break;
 						}
 				
-				if( findRmvId(f->openIds, cid)==-1  ) REPLY(NOTOPEN);
+				if( findRmvId(f->openIds, cid)==-1  ){  REPLY(NOTOPEN);  }
 				else REPLY(OK);
+				
+				break;
+ErrCLEANUP
+				exit(EXIT_FAILURE);
+ErrCLEAN
+				}
 				break;
 
 			
 			
 			
-			case(WRITE):				
-				File* f=getFile(cmd->filename);
+			case (WRITE):{
+ErrLOCAL		
+				printf("starting WRITE file '%s'\n", cmd.filename);	
+				File* f=getFile(cmd.filename);
 				if( f==NULL){ REPLY(NOTFOUND); break; }
 				
 				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); break; }
@@ -186,23 +247,26 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 				
 				REPLY(OK);
 				
+				printf("receiving files cont\n");
 				size_t size=0;
-				READ(cid, &size, csizeof(size_t));
+				READ(cid, &size, sizeof(size_t));
+				printf("size: %d\n", size);
 				
 				void* cont=NULL;
-				ErrNULL( cont=malloc(size) );
-				READ(cid, &cont, size);
+				ErrNULL( cont=calloc(1, size) );
+				READ(cid, cont, size);
+				printf("cont: %s", (char *) cont );
 				
 				if( size > MAXCAPACITY ){ REPLY(TOOBIG); break; }
 				
-				while( storage->numfiles == MAXNUFILES  ||  (storage->capacity+size) > MAXCAPACITY ){
+				while( storage->numfiles == MAXNUMFILES  ||  (storage->capacity+size) > MAXCAPACITY ){
 					REPLY(CACHE);
 					
 					File* victim=NULL;
 					ErrNULL( victim=rmvLastFile() );
 					
 					WRITE(cid, &victim->size, sizeof(size_t));
-					WRTIE(cid, &victim->cont, victim->size );
+					WRITE(cid, victim->cont, victim->size );
 					
 					fileDestroy( victim );
 					}
@@ -213,10 +277,18 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 				storage->capacity+=size;
 				
 				REPLY(OK);
+				
+				break;
+ErrCLEANUP
+				exit(EXIT_FAILURE);
+			ErrCLEAN
+				}
 				break;				
 
-			case(APPEND):
-				File* f=getFile(cmd->filename);
+			case (APPEND):{
+ErrLOCAL
+				printf("starting APPEND to file '%s'\n", cmd.filename);	
+				File* f=getFile(cmd.filename);
 				if( f==NULL){ REPLY(NOTFOUND); break; }
 				
 				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); break; }
@@ -229,41 +301,49 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 				READ(cid, &size, sizeof(size_t));
 				
 				void* buf=NULL;
-				ErrNULL( buf=malloc(size) );
-				READ(cid, &buf, size);
+				ErrNULL( buf=calloc(1, size) );
+				READ(cid, buf, size);
 				
 				if( size > MAXCAPACITY ){ REPLY(TOOBIG); break; }
 				
-				while( storage->numfiles == MAXNUFILES  ||  (storage->capacity+size) > MAXCAPACITY ){
+				while( storage->numfiles == MAXNUMFILES  ||  (storage->capacity+size) > MAXCAPACITY ){
 					REPLY(CACHE);
 					
 					File* victim=NULL;
 					ErrNULL( victim=rmvLastFile() );
 					
 					WRITE(cid, &victim->size, sizeof(size_t));
-					WRTIE(cid, &victim->cont, victim->size );
+					WRITE(cid, victim->cont, victim->size );
 					
 					fileDestroy( victim );
 					}
 					
 				void* extendedcont=NULL;
-				ErrNULL(  extendedcont=realloc( f->cont, file->size+size)  );
+				ErrNULL(  extendedcont=realloc( f->cont, f->size+size)  );
 				f->cont=extendedcont;
-				memcpy( f->cont+f->size, cont, size );
-				f->size+=size
+				memcpy( f->cont+f->size, buf, size );
+				f->size+=size;
+				printf("cont: %s", (char *) f->cont );
 				
 				storage->capacity+=size;
 				
 				free(buf);
 				
 				REPLY(OK);
+				break;
+ErrCLEANUP
+				exit(EXIT_FAILURE);
+ErrCLEAN
+				}
 				break;			
 
 
 
 
-			case(READ):
-				File* f=getFile(cmd->filename);
+			case (READ):{
+ErrLOCAL
+				printf("starting READ file '%s'\n", cmd.filename);	
+				File* f=getFile(cmd.filename);
 				if( f==NULL){ REPLY(NOTFOUND); break; }
 				
 				if( !findId(f->openIds, cid) ){ REPLY(NOTOPEN); break; }
@@ -273,40 +353,55 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 				REPLY(OK);
 				
 				WRITE(cid, &f->size, sizeof(size_t));
-				WRITE(cid, &f->cont, f->size);
-				
+				WRITE(cid, f->cont, f->size);
+
+				break;
+ErrCLEANUP
+				exit(EXIT_FAILURE);
+ErrCLEAN
+				}
 				break;
 			
 			
 			
 			
-			case(READN):
+			case (READN):{
+ErrLOCAL
+				printf("starting READN\n");	
 				REPLY(OK);
 				
 				File* curr=storage->last;
 				
-				int n=cmd->info;
+				int n=cmd.info;
 				
 				for( int i=0; i < (n<=0 ? storage->numfiles : n); i++){
 					if( curr==NULL) break;
 					
-					if( f->lockId!=-1 && f->lockId!=cid ) break;
+					if( curr->lockId!=-1 && curr->lockId!=cid ) break;
 					
 					REPLY(ANOTHER);
 					WRITE(cid, &curr->size, sizeof(size_t));
-					WRITE(cid, &curr->cont, curr->size);
+					WRITE(cid, curr->cont, curr->size);
 					
 					curr=curr->prev;					
 					}
 				
 				REPLY(OK);
+				
+				break;
+ErrCLEANUP
+				exit(EXIT_FAILURE);
+ErrCLEAN
+				}
 				break;			
 		
 		
 		
 		
-			case(REMOVE):
-				File* f=getFile(cmd->filename);
+			case (REMOVE):{
+ErrLOCAL
+				printf("starting REMOVE file '%s'\n", cmd.filename);	
+				File* f=getFile(cmd.filename);
 				if( f==NULL){ REPLY(NOTFOUND); break; }
 					
 				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); break; }
@@ -318,13 +413,23 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 				fileDestroy(f);
 				
 				REPLY(OK);
+				
+				break;
+ErrCLEANUP
+				exit(EXIT_FAILURE);
+ErrCLEAN
+				}
 				break;
 				
 				
 				
 				
-			case(LOCK):
-				File* f=getFile(cmd->filename);
+			case (LOCK):{
+ErrLOCAL
+				printf("LOCK file '%s'\n", cmd.filename);
+				
+				File* f=getFile(cmd.filename);
+				
 				if( f==NULL){ REPLY(NOTFOUND); break; }
 				
 				if( ! findId( f->openIds, cid) ){ REPLY(NOTOPEN); break; }
@@ -336,13 +441,21 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 				f->lockId=cid;
 				
 				REPLY(OK);
+
+				break;
+ErrCLEANUP
+				exit(EXIT_FAILURE);
+ErrCLEAN
+				}
 				break;
 				
 				
 				
 			
-			case(UNLOCK):
-				File* f=getfile(st, cmd->filename);
+			case (UNLOCK):{
+ErrLOCAL
+				printf("starting UNLOCK file '%s'\n", cmd.filename);	
+				File* f=getFile(cmd.filename);
 				if( f==NULL){ REPLY(NOTFOUND); break; }
 				
 				if( ! findId( f->openIds, cid) ){ REPLY(NOTOPEN); break; }
@@ -352,40 +465,67 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 				f->lockId=-1;
 				
 				REPLY(OK);
+
+				break;
+ErrCLEANUP
+				exit(EXIT_FAILURE);
+ErrCLEAN
+				}
 				break;
 			
-			case(QUIT):
+			case (QUIT):{
+ErrLOCAL
+				printf("quitting CONN\n");	
 				File* curr=storage->last;
 			
 				for( int i=0; i < storage->numfiles; i++){		//close all files open by cid, unlock all files locked by cid	
 					if( curr==NULL) break;				//safety check for empty list		
 					
-					findRmvId(f->openIds, cid);
-					if( f->lockId==cid ) f->lockId=-1;
+					findRmvId(curr->openIds, cid);
+					if( curr->lockId==cid ) curr->lockId=-1;
 										
 					curr=curr->prev;					
-					}				
-				
-				REPLY(OK);
+					}
+				quit=true;			
+				break;
+ErrCLEANUP
+				exit(EXIT_FAILURE);
+ErrCLEAN
+				}
 				break;
 				
 			default:
-				fprintf(stderr, "Come sei finito qui? cmd code: %d\n", cmd->code);
+				fprintf(stderr, "Come sei finito qui? cmd code: %d\n", cmd.code);
 				break;		
 			}
-		ErrNZERO(  pthread_rwlock_wrlock(storage->lock)  );
+		ErrNZERO(  pthread_rwlock_unlock(&storage->lock)  );
 		
-		if( !quit ) enqId( /* idqueue */, cid);
-		else /*	Client CID successfully unconnected */
+		if( !quit ){  WRITE( done, &cid, sizeof(int) );  }
+		else printf("Closing connection with client %d\n", cid);   /*	Client CID successfully unconnected */
+		
+		printf("STORAGE:  ----------------------------\n");
+		storagePrint();
+		printf("--------------------------------------\n\n");
+		fflush(stdin);
 		
 		}
+		
+ErrCLEANUP
+	exit(EXIT_FAILURE);
+ErrCLEAN
+
 	}
 
 void spawnworker(){								//worker threads SPAWNER
 	for(int i=0; i<MAXTHREADS-1; i++){
-		CREATE( &tid[i], NULL, work, NULL);			//WORKER THREAD
+		CREATE(&tid[i], NULL, work, NULL);		//WORKER THREAD
 		printf("Created worker thread %d\n", i);
-		}	
+		}
+
+	return ;
+ErrCLEANUP
+	return ;
+ErrCLEAN
 	}
 	
 /*-----------------------------------------------------MAIN----------------------------------------------------------*/	
@@ -398,8 +538,7 @@ int main(){
 	sigset_t mask, oldmask;			//SIGNAL MASKS
 	sigemptyset(&mask);   
 	sigaddset(&mask, SIGINT); 
-	sigaddset(&mask, SIGQUIT);
-	sigaddset(&mask, SIGTERM);
+	sigaddset(&mask, SIGQUIT);				//dropped SIGTERM
 	sigaddset(&mask, SIGHUP);	
 	pthread_sigmask(SIG_BLOCK, &mask, &oldmask);	//blocks signals during SERVER INITIALIZATION
 	
@@ -409,26 +548,22 @@ int main(){
 	
 	sigaction(SIGINT, &sigst, NULL);				//assigns each SIG to the SIG HANDLER
 	sigaction(SIGQUIT, &sigst, NULL);
-	sigaction(SIGTERM, &sigst, NULL);
-	sigaction(SIGHUP, &sigst, NULL);
+	sigaction(SIGHUP, &sigst,NULL);
 	
 	
 	
 	
-	int sid=socket(AF_UNIX, SOCK_STREAM, 0);		//SID: server id (fd), SOCKET assigns it a free channel
-	if( sid<0){
-		perror("Error: couldnt open socket\n");
-		exit(EXIT_FAILURE);
-		}
+	int sid=-1;
+	ErrNEG1(  sid=socket(AF_UNIX, SOCK_STREAM, 0)  );	//SID: server id (fd), SOCKET assigns it a free channel
 	
-	struct sockaddr_un saddr;						//saddr: server address, needed for BIND
+	struct sockaddr_un saddr;							//saddr: server address, needed for BIND
 	memset(&saddr, 0, sizeof(saddr));
 	saddr.sun_family=AF_UNIX;							//adds domain and pathname to the server address structure
 	strcpy(saddr.sun_path, SPATHNAME);				
 	
-	BIND(sid, (struct sockaddr*) &saddr, SUN_LEN(&saddr));		//BIND: NAMING of the opened socket
+	ErrNEG1(  bind(sid, (struct sockaddr*) &saddr, SUN_LEN(&saddr))  );	//BIND: NAMING of the opened socket
 	
-	LISTEN( sid, 8);								//sets socket in LISTEN mode with a single connection
+	ErrNEG1( listen(sid, 8)  );							//sets socket in LISTEN mode with a single connection
 	
 	printf("Server started\n");
 	
@@ -444,11 +579,8 @@ int main(){
 	
 	
 	
-	pending=qcreate();								//PENDING queue
-	if( pending==NULL){
-		perror("Error: couldnt create pending queue\n");
-		exit(EXIT_FAILURE);
-		}
+	ErrNULL(  pending=idListCreate()  )				//PENDING queue
+	
 	
 	
 	
@@ -456,14 +588,10 @@ int main(){
 	if( mkfifo("./done", 0777) != 0){				//DONE named pipe
 		if( errno != EEXIST){
 			perror("Error: couldnt create named pipe\n");
-			exit(EXIT_FAILURE);
+			ErrFAIL;
 			}
 		}
-	done=open("./done", O_RDWR);
-	if( done<0){
-		perror("Error: couldnt open named pipe\n");
-		exit(EXIT_FAILURE);
-		}
+	ErrNEG1(  done=open("./done", O_RDWR)  );
 	
 	FD_SET(done, &all);									//adding DONE to ALL
 	if(done > maxid) maxid=done;
@@ -471,7 +599,12 @@ int main(){
 	
 	
 	
-	spawnworker();									//worker threads SPAWNER						
+	spawnworker();									//worker threads SPAWNER	
+	
+	
+	
+	
+	ErrNEG1(  storageCreate()  );
 		
 	printf("Server ready\n");
 	pthread_sigmask(SIG_SETMASK, &oldmask, NULL);	//unlocks SIGNALS for the rest of the execution
@@ -500,7 +633,7 @@ int main(){
 					}
 				else{									//one of the clients has something that the server has to read
 					FD_CLR( i, &all);
-					enq(pending, i);
+					enqId(pending, i);
 					printf("serving client %d\n", i);
 					}				
 				}
@@ -510,10 +643,15 @@ int main(){
 	
 	close(sid);							// /!\ only way to close the server is with signals
 	unlink(SPATHNAME);
-	qdestroy(pending);
+	idListDestroy(pending);
 	close(done);
 										// /!\ terminate threads correctly
 										
 	printf("\nServer successfully closed\n");
 	return 0;
+	
+ErrCLEANUP
+	//...
+	exit(EXIT_FAILURE);
+ErrCLEAN
 	}
