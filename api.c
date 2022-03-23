@@ -5,62 +5,50 @@
 #include <unistd.h>
 #include <errno.h>
 #include <limits.h>
-#include <sys/stat.h>
 #include <linux/limits.h>	//PATH_MAX
 #include <sys/socket.h>
 #include <sys/un.h>
-#include <time.h>
+#include <time.h>			//timespec for openConnection()
+#include <sys/stat.h>		//mkdir() for mkpath()
+#include <libgen.h>			//dirname() for mkpath()
 
 #include "./comm.h"
 #include "./errcheck.h"
 #include "./api.h"
-#include "./utils.h"
+#include "./utils.h"		//READ(), WRITE(), FREAD(), FWRITE()
 
 int sid=-1;		//Server ID
 char* ssocket=NULL;
 
 bool print=false;
 
-/*----------------------------------------------Frequently Used Code-------------------------------------------------*/	
-/*-------------------------------------------------------------------------------------------------------------------*/
-	
-#define WRITE( id, addr, size){										\
-		ErrNEG1( writefull(id, addr, size)  );						\
-	/*	ErrDIFF( write(),  size);	//optional strict version */	\
-		}
+/*-------------------------------------------------INTERNAL USE------------------------------------------------------*/
+/*---------------------------------------------Frequently Used Code--------------------------------------------------*/	
+
+#define CHKPATHNAME( pathname){												\
+	if( pathname==NULL){													\
+		fprintf(stderr,"Logic: no file specified\n");						\
+		errno=EINVAL;														\
+		return -1;															\
+		}																	\
+	if( strlen(pathname) > PATH_MAX-1){										\
+		fprintf(stderr,"Warning: file pathname longer than %d\n", PATH_MAX-1);\
+		errno=ENAMETOOLONG;													\
+		return -1;															\
+		}																	\
+	}
+
+#define CHKCONN( sid ){																	\
+	if( sid==-1){																		\
+		fprintf(stderr, "Warning: client not connected, use openConnection() first\n");	\
+		errno=ENOTCONN;																	\
+		return -1;																		\
+		}																				\
+	}
+
+#define ErrREPL( rv ) if( (rv)==-1) goto ErrCleanup;
+//SKIPS the default errno printing inside ErrNEG1 for all firstCMDREPLY() calls (they already give detailed logic errors)
 		
-#define READ( id, addr, size){										\
-		ErrNEG1( readfull(id, addr, size)  );						\
-	/*	ErrDIFF( read(),  size);	//optional strict version */	\
-		}
-
-#define FWRITE( addr, size, n, id){	/*implicitly strict version*/	\
-		ErrNEG1( fwrite( addr, size, n, id)  );						\
-	/*	ErrNEG1( fwritefull( addr, size, n, id) );	*/				\
-		}
-
-#define FREAD( addr, size, n, id){	/*implicitly strict version*/	\
-		ErrNEG1( fread( addr, size, n, id)  );						\
-	/*	ErrNEG1( fwritefull( addr, size, n, id) );	*/				\
-		}
-
-#define CHKPATHNAME( pathname){				\
-	if( pathname==NULL){					\
-		errno=EINVAL;						\
-		return -1;							\
-		}									\
-	if( strlen(pathname) > PATH_MAX ){		\
-		errno=ENAMETOOLONG;					\
-		return -1;							\
-		}									\
-	}
-
-#define CHKCONN( sid ){						\
-	if( sid==-1){							\
-		errno=ENOTCONN;						\
-		return -1;							\
-		}									\
-	}
 
 static void setCmd( Cmd* cmd, CmdCode code, const char* pathname, int info){
 	memset( cmd, 0, sizeof(Cmd) );
@@ -72,47 +60,47 @@ static void setCmd( Cmd* cmd, CmdCode code, const char* pathname, int info){
 static void errReply( Reply r, const char* pathname){
 	switch( r ){
 		case(NOTFOUND):
-			fprintf(stderr, "Error: file '%s' NOT FOUND in the FSS\n", pathname);
+			fprintf(stderr, "Logic: file '%s' NOT FOUND in the FSS\n", pathname);
 			errno=ENOENT;
 			break;
 			
 		case(EXISTS):
-			fprintf(stderr, "Error: CANT CREATE file '%s' because the file is already present in the FSS\n", pathname);
+			fprintf(stderr, "Logic: CANT CREATE file '%s' because the file is already present in the FSS\n", pathname);
 			errno=EEXIST;
 			break;
 			
 		case(LOCKED):
-			fprintf(stderr, "Error: The file '%s' is currently LOCKED by another client\n", pathname);
+			fprintf(stderr, "Logic: The file '%s' is currently LOCKED by another client\n", pathname);
 			errno=EBUSY;
 			break;
 			
 		case(NOTOPEN):
-			fprintf(stderr, "Error: This client has NOT OPENED file '%s' and thus cannot access to it\n", pathname);
+			fprintf(stderr, "Logic: This client has NOT OPENED file '%s' and thus cannot access to it\n", pathname);
 			errno=EACCES;
 			break;
 		
 		case(ALROPEN):
-			fprintf(stderr, "Error: This client had ALREADY OPENED file '%s'\n", pathname);
+			fprintf(stderr, "Logic: This client had ALREADY OPENED file '%s'\n", pathname);
 			errno=EALREADY;
 			break;
 		
 		case(NOTLOCKED):
-			fprintf(stderr, "Error: This client must acquire the LOCK on file '%s' before performing this action\n", pathname);
+			fprintf(stderr, "Logic: This client must acquire the LOCK on file '%s' before performing this action\n", pathname);
 			errno=ENOLCK;
 			break;
 			
 		case(ALRLOCKED):
-			fprintf(stderr, "Error: This client ALREADY HAS the LOCK on file '%s'\n", pathname);
+			fprintf(stderr, "Logic: This client ALREADY HAS the LOCK on file '%s'\n", pathname);
 			errno=EALREADY;
 			break;
 		
 		case(NOTEMPTY):
-			fprintf(stderr, "Error: Trying to WRITE on file '%s' which was already initialized, use APPEND functionality\n", pathname);
+			fprintf(stderr, "Logic: Trying to WRITE on file '%s' which was already initialized, use APPEND functionality\n", pathname);
 			errno=ENOTEMPTY;
 			break;
 		
 		case(TOOBIG):
-			fprintf(stderr, "Error: The file '%s' is LARGER than the current FSS CAPACITY\n", pathname);
+			fprintf(stderr, "Logic: The file '%s' is LARGER than the current FSS CAPACITY\n", pathname);
 			errno=EFBIG;
 			break;
 			
@@ -134,11 +122,12 @@ static int firstCMDREPLY( CmdCode code, const char* pathname, int info ){
 	Reply reply;
 	READ( sid, &reply, sizeof(Reply));		//ERR: SETS ERRNO
 	
-	if( reply == OK ) return 0;				//OK!
-	else{
+	if( reply!=OK ){
 		errReply( reply, pathname);			//ERR: PRINTS ERR and SETS ERRNO
-		return -1;		
+		if( reply==ALROPEN || reply==ALRLOCKED) return 0;	//these are NON DISRUPTIVE
+		else return -1;										//all others are DISRUPTIVE		
 		}
+	else return 0;		//reply==OK						
 		
 ErrCLEANUP
 	return -1;
@@ -177,42 +166,27 @@ ErrCLEANUP
 	if(cont) free(cont);
 	return -1;
 ErrCLEAN
-
 	}
 
-/* @brief	used by READ to receive a KNOWN file														(buf,sz!=NULL  savedir==NULL)
- *			used by READN to receive an UNKNOWN file													(buf,sz==NULL  savedir!=NULL)
- *			used by OPEN, WRITE, APPEND to receive an UNKNOWN file triggered by CACHE ALG. ejection		(buf,sz==NULL  savedir!=NULL)
+/** @brief	used by READN to receive an UNKNOWN file
+ *			used by OPEN, WRITE, APPEND to receive an UNKNOWN file triggered by CACHE ALG. ejection
  */
-static int RECVfile( void** buf, size_t* sz, const char* savedir){
+static int RECVfile(const char* savedir){
 	char * pathname=NULL;
 	size_t size=0;
 	void* cont=NULL;
-	FILE* file=NULL;			//if SAVING enabled this is used to write the RECEIVED file
 		
 	READ( sid, &size, sizeof(size_t) );
 	ErrNULL(  cont=malloc( size)  );				//ERR: malloc failure (sets ERRNO=ENOMEM)	
-	READ( sid, cont, size);							//ERR: read error while receiving data from server
+	READ( sid, cont, size);
+	ErrNULL(  pathname=malloc(PATH_MAX) );			//ERR: ...
+	READ( sid, pathname, PATH_MAX);					//an extra READ is needed from SERVER to get the file PATHNAME (+sets a flag to remember this)
+	
+	if( savedir!=NULL )				//if a TRASH/SAVE DIR has been specified the file gets written in a file in it	
+		SAVEfile( cont, size, pathname, savedir);
 
-	if( savedir!=NULL ){				//if a TRASH/SAVE DIR has been specified the file gets written in a file in it	
-		ErrNULL(  pathname=malloc(PATH_MAX) );		//(if the caller is READN/OPEN/WRITE/APPEND)	
-		READ( sid, pathname, PATH_MAX);		//an extra READ is needed from SERVER to get the file PATHNAME (+sets a flag to remember this)
-		
-		//TODO CREATE DIR STRUCTURE inside SAVEDIR
-		
-		ErrNULL(  file=fopen( pathname, "w")  );		//ERR: file not found or other (fopen SETS ERRNO)
-    	
-    	FWRITE( cont, size, 1, file );				//ERR: file write error (fwritefull SETS ERRNO=EIO)	
-    	}
-    	
-    if( buf!=NULL && sz!=NULL ){	//if BUF and SZ are present, the call comes from readFiles() 
-    	*buf=cont;							//the received file gets passed to the client trough these PTRs
-    	*sz=size;							//the user of the API has the duty to free CONT's memory
-    	}
-    else free(cont);
- 
-SUCCESS
-	if(pathname) free(pathname);
+	free(cont);
+	free(pathname);
     return 0;
     
 ErrCLEANUP
@@ -222,14 +196,14 @@ ErrCLEANUP
 ErrCLEAN
 	}
 	
-static int CACHEretrieve( const char* savedir){
+static int CACHEretrieve( const char* trashdir){
 	while(1){						//LOOP for each file EJECTED from the FSS by the cache alg.
 		Reply reply;
 		READ( sid, &reply, sizeof(Reply));
 		
 		if(reply==OK) break;			//EXIT COND: this means that all excess files have been EJECTED from the FSS
 		else if( reply==CACHE)			//OTHERWISE: keep receiving the files from the FSS
-			ErrNEG1(  RECVfile( NULL, NULL, savedir)  );
+			ErrNEG1(  RECVfile(trashdir)  );
 		}
 SUCCESS
 	return 0;
@@ -237,16 +211,81 @@ ErrCLEANUP
 	return -1;
 ErrCLEAN
 	}
-	
+
 static double diffTimespec(const struct timespec *t1, const struct timespec *t0){
 	return (t1->tv_sec - t0->tv_sec) + (t1->tv_nsec - t0->tv_nsec)/1000000000.0;	//10^9
+	}
+
+/*---------------------------------------------------PUBLIC USE------------------------------------------------------*/	
+/*-------------------------------------------------------------------------------------------------------------------*/
+
+int mkpath(char *dir){											//no NULL checks, it's the caller's duty
+    if (strlen(dir) == 1 && dir[0] == '/') return 0;			//exit cond: only '/' remains
+    
+    if( strcmp(dir, "..")==0 || strcmp(dir,".")==0 ) return 0;	//ignores '.' and '..' otherwise endless recursive loop
+    
+    mkpath(dirname(strdupa(dir)));		//ES:   str: /home/path/file.txt    dirname( str ): /home/path    basename(str): file.txt
+												//strdupa( str):   strdup with automatic free, compile with -D_GNU_SOURCE
+    if( mkdir(dir, 0777)==-1)			//Dont care about permissions for this, using default system mask should be good
+    	if(errno != EEXIST)
+    		ErrFAIL;								//ERR: if it fails at any level for some reason (other than dir alr existing) (mkdir SETS ERRNO)
+SUCCESS
+	return 0;
+ErrCLEANUP
+	return -1;
+ErrCLEAN
+   	}
+	
+int SAVEfile(void* cont, size_t size,const char* pathname, const char* savedir){
+	if( savedir==NULL ){
+		fprintf(stderr,"Warning: directory not specified, file '%s' wont be saved\n", pathname);
+		return 0;
+		}
+	if( strlen(savedir)+1+strlen(pathname) > PATH_MAX-1 ){
+		fprintf(stderr,"Error: resulting pathname longer than %d chars, file '%s' wont be saved\n", PATH_MAX-1, pathname);
+		errno=ENAMETOOLONG;
+		return -1;
+		}
+
+	FILE* file=NULL;
+
+	char* altname=strdupa(pathname);
+	for( int i=0; i<strlen(altname); i++)			// pathname: ./home/spock/sol/kirk.txt  ->  altfname: f-home-spock-sol-kirk.txt
+		if( altname[i]=='/') altname[i]='-';
+	
+	if( altname[0]=='.') altname[0]='f';			// /!\ without this all relative path files (starting with a dot '.') are HIDDEN in the folders	
+	
+	//mode_t oldmask=umask(0000);
+	
+	char* dircpy=strdupa(savedir);
+	ErrNEG1(  mkpath(dircpy)  );
+	
+	//umask(oldmask);
+	
+	char finalpathname[PATH_MAX];
+	memset( finalpathname, '\0', PATH_MAX );
+	strcpy( finalpathname, savedir );
+	strcat( finalpathname, "/");
+	strcat( finalpathname, altname);	
+	
+	ErrNULL(  file=fopen( finalpathname, "w")  );
+	FWRITE( cont, size, 1, file);
+	fflush(file); /* fsync(fileno(file)); */
+
+SUCCESS
+	fclose(file);
+	return 0;
+ErrCLEANUP
+	if(file) fclose(file);
+	return -1;
+ErrCLEAN
 	}
 
 /*------------------------------------------------------API----------------------------------------------------------*/	
 /*-------------------------------------------------------------------------------------------------------------------*/
 
 int openFile( const char* pathname, int flags, /* */const char* trashdir){	// /!\ TRASHDIR arg not present in specification
-	ErrNEG1(  firstCMDREPLY( OPEN, pathname, flags)  );
+	ErrREPL(  firstCMDREPLY( OPEN, pathname, flags)  );
 	ErrNEG1(  CACHEretrieve( trashdir)  );
 
 SUCCESS	
@@ -262,9 +301,8 @@ int closeFile( const char* pathname){
 	
 
 int writeFile( const char* pathname, const char* trashdir ){
-	ErrNEG1(  firstCMDREPLY( WRITE, pathname, 0)  );
+	ErrREPL(  firstCMDREPLY( WRITE, pathname, 0)  );
 	ErrNEG1(  SENDfile( pathname)  );
-	printf("file sent\n");
 	ErrNEG1(  CACHEretrieve( trashdir)  );
 
 SUCCESS	
@@ -277,15 +315,14 @@ ErrCLEAN
 
 
 int appendToFile( const char* pathname, void* buf, size_t size, const char* trashdir ){
-	ErrNEG1(  firstCMDREPLY( APPEND, pathname, 0)  );
+	ErrREPL(  firstCMDREPLY( APPEND, pathname, 0)  );
 	
 	WRITE(sid, &size, sizeof(size_t));
 	WRITE(sid, buf, size);
 	
 	ErrNEG1(  CACHEretrieve( trashdir)  );
 
-SUCCESS	
-	return 0;
+	return 0;	//SUCCESS
 
 ErrCLEANUP
 	return -1;
@@ -293,14 +330,26 @@ ErrCLEAN
 	}
 
 
-int readFile( const char* pathname, void** buf, size_t* size /*,const char* readdir*/){
-	if( buf==NULL || size==NULL ){						//it makes sense that like readNFiles() even readFile gets a READDIR arg to store read files
+int readFile( const char* pathname, void** buf, size_t* sz /*,const char* readdir*/){
+	if( buf==NULL || sz==NULL ){						//it makes sense that like readNFiles() even readFile gets a READDIR arg to store read files
 		errno=EINVAL;											//READDIR isnt present in the specification though
 		return -1;
 		}
 	
-	ErrNEG1(  firstCMDREPLY( READ, pathname, 0)  );				
-	return RECVfile( buf, size, NULL /*readdir*/);
+	ErrREPL(  firstCMDREPLY( READ, pathname, 0)  );
+	
+	size_t size=0;
+	void* cont=NULL;
+		
+	READ( sid, &size, sizeof(size_t) );
+	ErrNULL(  cont=malloc( size)  );				//ERR: malloc failure (sets ERRNO=ENOMEM)	
+	READ( sid, cont, size);	
+
+    *buf=cont;							//the received file gets passed to the client trough these PTRs
+    *sz=size;							//the user of the API has the duty to free CONT's memory
+	
+	free(cont);
+	return 0;
 
 ErrCLEANUP
 	return -1;
@@ -313,15 +362,15 @@ int readNFiles( int n, const char* readdir){
 	
 	if( readdir==NULL)	return read;	//not much sense in requesting n reads if there is no READDIR specified to save all the files
 		
-	ErrNEG1(  firstCMDREPLY( READN, 0, n)  );
+	ErrREPL(  firstCMDREPLY( READN, "", n)  );
 	
-	while(1){						//LOOP for each file EJECTED from the FSS by the cache alg.
+	while(1){						//LOOP for each file to be READ from the FSS
 		Reply reply;
 		READ( sid, &reply, sizeof(Reply));
 		
-		if ( reply==OK) break;			//exit condition: this means that all excess files have been EJECTED from the FSS
+		if ( reply==OK) break;			//exit condition: this means that all requested files have been sent back to the client
 		else if( reply==ANOTHER){
-			ErrNEG1(  RECVfile( NULL, NULL, readdir)  );
+			ErrNEG1(  RECVfile(readdir)  );
 			read++;
 			}
 		}
@@ -410,7 +459,7 @@ int openConnection(const char* sockname, int msec, const struct timespec abstime
 		clock_gettime(CLOCK_REALTIME, &currtime);		//gets the CURRENT TIME
 	
 	} while( diffTimespec( &abstime, &currtime)>0 );	//if ABSTIME hasnt been reached LOOP again
-	
+
 	if(connected) return 0;
 	else return -1;
 	
@@ -440,8 +489,8 @@ int closeConnection(const char* sockname){
 	
 	ErrNEG1( close(sid)  );
 	sid=-1;
-	return 0;											
-
+	return 0;
+											
 ErrCLEANUP
 	return -1;
 ErrCLEAN

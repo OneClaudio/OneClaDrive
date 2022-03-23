@@ -1,17 +1,19 @@
 /* simplified version of ec.c/ec.h inspired from AUP book (Rochkind) */
 #include <stdbool.h>
-#include <assert.h>
+//#include <assert.h>
 #include <stdio.h>
+#include <errno.h>
 
-const bool ErrInCLEANUP=false;
-
+//extern const bool ErrInCLEANUP;	//needs an errcheck.c file with its definition: const bool ErrInCLEANUP=false;
+									//WARNING: this was used to prevent infinite loops when using these macros from within the cleanup section
+										//Removing this because raises warnings for not being used. Be careful not to commit this mistake ^^^
 #define ErrCLEANUP				\
 	ErrWARN						\
 								\
 	ErrCleanup:					\
-		{						\
-		bool ErrInCLEANUP;		\
-		ErrInCLEANUP=true;
+		{						
+		//bool ErrInCLEANUP;	
+		//ErrInCLEANUP=true;
 
 #define ErrCLEAN				\
 		}
@@ -22,7 +24,7 @@ const bool ErrInCLEANUP=false;
 
 #define ErrCMPR( rv , errv)																		\
 	{																							\
-		assert( !ErrInCLEANUP );																\
+	/*	assert( !ErrInCLEANUP );*/																\
 		errno=0;																				\
 		if( (rv)==(errv) ){																		\
 			int errnocpy=errno;																	\

@@ -78,20 +78,7 @@
     pthread_exit((void*)EXIT_FAILURE);			   										\
   	}
 */
-
-#define WRITE( id, addr, size){										\
-		ErrNEG1( writefull(id, addr, size)  );						\
-	/*	ErrDIFF( write(),  size);	//optional strict version */	\
-		}
-		
-#define READ( id, addr, size){										\
-		ErrNEG1( readfull(id, addr, size)  );						\
-	/*	ErrDIFF( read(),  size);	//optional strict version */	\
-		}
-
-#define CREATE( t, att, f, arg){									\
-		ErrNEG1(  pthread_create( t, att, f, arg)  );			\
-		}	
+#define CREATE( t, att, f, arg) ErrNEG1(  pthread_create( t, att, f, arg)  );
 
 #define ACCEPT( cid, sid, addr, l) errno=0;					\
 	cid=accept( sid, addr, l);								\
@@ -106,7 +93,7 @@
 	reply=MSG;								\
 	WRITE( cid, &reply, sizeof(Reply) );	\
 	}
-
+	
 #define SPATHNAME "./server_sol"	//Server socket pathname
 
 #define MAXNUMFILES 100
@@ -194,6 +181,7 @@ ErrLOCAL
 					
 					WRITE(cid, &victim->size, sizeof(size_t));
 					WRITE(cid, victim->cont, victim->size );
+					WRITE(cid, victim->name, PATH_MAX);
 					
 					fileDestroy( victim );					
 					}
@@ -250,7 +238,7 @@ ErrLOCAL
 				printf("receiving files cont\n");
 				size_t size=0;
 				READ(cid, &size, sizeof(size_t));
-				printf("size: %d\n", size);
+				printf("size: %ld\n", size);
 				
 				void* cont=NULL;
 				ErrNULL( cont=calloc(1, size) );
@@ -267,6 +255,7 @@ ErrLOCAL
 					
 					WRITE(cid, &victim->size, sizeof(size_t));
 					WRITE(cid, victim->cont, victim->size );
+					WRITE(cid, victim->name, PATH_MAX);
 					
 					fileDestroy( victim );
 					}
@@ -314,6 +303,7 @@ ErrLOCAL
 					
 					WRITE(cid, &victim->size, sizeof(size_t));
 					WRITE(cid, victim->cont, victim->size );
+					WRITE(cid, victim->name, PATH_MAX);
 					
 					fileDestroy( victim );
 					}
@@ -382,6 +372,7 @@ ErrLOCAL
 					REPLY(ANOTHER);
 					WRITE(cid, &curr->size, sizeof(size_t));
 					WRITE(cid, curr->cont, curr->size);
+					WRITE(cid, curr->name, PATH_MAX);
 					
 					curr=curr->prev;					
 					}
@@ -473,8 +464,8 @@ ErrCLEAN
 				}
 				break;
 			
+//			case (IDLE):
 			case (QUIT):{
-ErrLOCAL
 				printf("quitting CONN\n");	
 				File* curr=storage->last;
 			
@@ -487,13 +478,9 @@ ErrLOCAL
 					curr=curr->prev;					
 					}
 				quit=true;			
-				break;
-ErrCLEANUP
-				exit(EXIT_FAILURE);
-ErrCLEAN
 				}
 				break;
-				
+			
 			default:
 				fprintf(stderr, "Come sei finito qui? cmd code: %d\n", cmd.code);
 				break;		

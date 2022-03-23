@@ -1,7 +1,8 @@
 #ifndef FSSAPI_H
 #define FSSAPI_H
 
-#include <stdbool.h>
+#define	O_CREATE 0x1
+#define O_LOCK	 0x2
 
 int openFile( const char* pathname, int flags, /* */const char* trashdir);
 
@@ -26,5 +27,11 @@ int openConnection(const char* sockname, int msec, const struct timespec abstime
 int closeConnection(const char* sockname);
 
 int ezOpen(const char* sockname);
+
+
+
+int SAVEfile(void* cont, size_t size,const char* pathname, const char* savedir);
+
+int mkpath(char *dir);
 
 #endif

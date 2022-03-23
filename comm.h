@@ -2,6 +2,7 @@
 #include <linux/limits.h>	//PATH_MAX
 
 typedef enum CmdCode{
+//	IDLE    ,
 	OPEN	,
 	CLOSE	,
 	WRITE	,
@@ -30,12 +31,11 @@ typedef enum Reply{
 	TOOBIG
 	} Reply;
 	
-// openFile() Flags:
 #define	O_CREATE 0x1
 #define O_LOCK	 0x2
 
 typedef struct {
 	CmdCode code;
-	int info;	//'open' flags   or   number of files in readn/cache alg
+	int info;		//'open' flags   or   number of files in readn/cache alg
 	char filename[PATH_MAX];
 	} Cmd;
