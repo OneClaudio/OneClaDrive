@@ -20,6 +20,38 @@
 #include "./filestorage.h"
 #include "./errcheck.h"
 
+
+	
+	
+	
+
+FILE* Log=NULL;
+pthread_mutex_t LogMutex;
+
+#define LOCK(l)   ErrERRNO(  pthread_mutex_lock(l)   );
+#define UNLOCK(l) ErrERRNO(  pthread_mutex_unlock(l) );
+
+#define LOG(...)					\
+	{	printf(__VA_ARGS__);		\
+		LOCK(&LogMutex);			\
+		fprintf( Log,__VA_ARGS__);	\
+		fflush(Log);				\
+		UNLOCK(&LogMutex);			\
+		}
+
+
+
+#define LOGOP( esit, file, sz)																								\
+	{	char size[8]="0";																								\
+		if(sz!=NULL) sprintf(size,"%zu", *(size_t*)sz );																					\
+		LOG( "WORK: CID=%-4d""%-7s""%-10s""%s %s""\t%s\n", cid, strCmdCode(cmd.code), strReply(esit), ( sz ? size : ""),	\
+		 													( sz ? "B" : ""), file ? file : ""  );			\
+		}
+
+#define RDLOCK(l)   ErrNZERO(  pthread_rwlock_rdlock(l)  );
+#define WRLOCK(l)   ErrNZERO(  pthread_rwlock_wrlock(l)  );
+#define RWUNLOCK(l) ErrNZERO(  pthread_rwlock_unlock(l)  );
+
 #define OFF 0x00
 #define SOFT 0x01
 #define ON 0x02
@@ -28,69 +60,16 @@ volatile sig_atomic_t Status=ON;
 
 void handlesoft(int unused){
 	Status=SOFT;
-	printf("\nSOFT quit signal received: NO NEW CONNECTIONS ALLOWED\n");
+	LOG("MAIN: SOFT QUIT SIGNAL RECEIVED -> NO NEW CONNECTIONS ALLOWED\n");
+	return; ErrCLEANUP ErrCLEAN
 	}
 
 void  handleoff(int unused){
 	Status=OFF;
-	printf("\nHARD quit signal received: NO FURTHER REQUESTS WILL BE EXECUTED\n");
+	LOG("MAIN: HARD QUIT SIGNAL RECEIVED -> NO FURTHER REQUESTS WILL BE EXECUTED\n");
+	return; ErrCLEANUP ErrCLEAN
 	}
 
-/*
-#define BIND( id, addr, l) errno=0;				\
-	if( bind( id, addr, l) != 0 ){				\
-		perror("Error: couldnt name socket\n"); \
-		exit(EXIT_FAILURE);						\
-		}
-		
-#define LISTEN( id, bl) errno=0;									\
-	if( listen( id, bl) != 0 ){										\
-		perror("Error: couldnt listen on the specified socket\n"); 	\
-		exit(EXIT_FAILURE);											\
-		}
-
-#define WRITE( id, addr, l) errno=0;								\
-	if( writen( id, addr, l) <0 ){									\
-		perror("Error during write\n");								\
-		break;														\
-		}
-
-#define READ( id, addr, l) errno=0;									\
-	if( readn( id, addr, l) <0 ){									\
-		perror("Error during read\n");								\
-		break;														\
-		}
-
-#define CREATE( t, att, f, arg)		if(pthread_create( t, att, f, arg) != 0){				\
-	fprintf(stderr, "Error while creating thread %s at %s:%d\n", #t, __FILE__, __LINE__);	\
-	perror(NULL);																			\
-	pthread_exit(NULL);																		\
-	}
-
-#define JOIN( t, att)	if(pthread_join( t, att) != 0){										\
-	fprintf(stderr, "Error while waiting thread %s at %s:%d\n", #t, __FILE__, __LINE__);	\
-	perror(NULL);																			\
-	exit(errno);																			\
-	}
-	
-#define RDLOCK(l)      if (pthread_rwlock_rdlock(l) != 0){								\
-	fprintf(stderr, "Error during rdlock: '%s' at %s:%d\n", #l, __FILE__, __LINE__);	\
-	perror(NULL);																		\
-    pthread_exit((void*)EXIT_FAILURE);			   										\
-  	}
-
-#define WRLOCK(l)      if (pthread_rwlock_wrlock(l) != 0){								\
-	fprintf(stderr, "Error during wrlock: '%s' at %s:%d\n", #l, __FILE__, __LINE__);	\
-	perror(NULL);																		\
-    pthread_exit((void*)EXIT_FAILURE);			   										\
-  	}
- 
-#define UNLOCK(l)      if (pthread_rwlock_unlock(l) != 0){								\
-	fprintf(stderr, "Error during unlock: '%s' at %s:%d\n", #l, __FILE__, __LINE__);	\
-	perror(NULL);																		\
-    pthread_exit((void*)EXIT_FAILURE);			   										\
-  	}
-*/
 #define CREATE( t, att, f, arg) ErrNEG1(  pthread_create( t, att, f, arg)  );
 
 #define ACCEPT( cid, sid, addr, l){ errno=0;				\
@@ -113,6 +92,7 @@ void  handleoff(int unused){
 	WRITE( cid, &reply, sizeof(Reply) );	\
 	}
 
+#define LOGPATHN	"./serverlog.txt"
 #define FIFOPATHN	"./done"
 #define SOCKETPATHN "./server_sol"	//Server socket pathname		//TODO move to config file
 #define MAXNUMFILES 100
@@ -123,6 +103,7 @@ void  handleoff(int unused){
 pthread_t tid[MAXTHREADS-1];		//WORKER THREADS
 
 #define TERMINATE -2
+#define DISCONN   -3
 
 
 
@@ -137,7 +118,7 @@ Storage* storage;
 void* work(void* unused){			//ROUTINE of WORKER THREADS
 	
 	while(1){
-		bool quit=false;
+		bool disconnecting=false;
 		
 		int cid=NOTSET;					//tries to get CID from QUEUE
 		while( (deqId(pending, &cid))==EMPTYLIST){	//if empty BUSY WAIT with timer
@@ -147,7 +128,6 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 		if(cid==TERMINATE) break;
 													
 		Cmd cmd={0};						//gets CMD request from CIDs channel
-		//memset( &cmd, 0, sizeof(Cmd) );	
 		READ(cid, &cmd, sizeof(Cmd));
 		
 		
@@ -157,40 +137,31 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 			
 			case (OPEN):{
 				ErrLOCAL
-			/*	if(cmd.filename == NULL)	//Already checked in API call//  */
-				printf("starting OPEN file '%s'\n", cmd.filename);
+			/*	if(cmd.filename == NULL)	//Already checked in API call, could double check in each case but its an hassle  */
 						
 				File* f=getFile(cmd.filename);
 				
 				if( cmd.info & O_CREATE ){	//Client requested an O_CREATE openFile()
-					if( f!=NULL){								//ERR: file already existing
-						REPLY(EXISTS);
-						break;
-						}
-						
+					if( f!=NULL){   REPLY(EXISTS); LOGOP(EXISTS,cmd.filename,NULL); break;	} //ERR: file already existing
 					ErrNULL(  f=fileCreate(cmd.filename)  );	//ERR:	fatal malloc error while allocating space for new file (ENOMEM)
-						
 					ErrNEG1(  addNewFile(f)  );					//Successful CREATION	
-					}	
-				else{		//Client requested a normal openFile()
-					if( f==NULL){
-						REPLY(NOTFOUND);						//ERR: file not already existing/not found
-						break;
-						}
+					}						//Client requested a normal openFile()	
+				else{
+					if( f==NULL){   REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break;	} //ERR: file not already existing/not found
+					if( findId(f->openIds, cid) ){   REPLY(ALROPEN); LOGOP(ALROPEN,cmd.filename,NULL); break; } //ERR: cid already opened this file
 					}
 				
-				if( findId(f->openIds, cid) ) REPLY(ALROPEN);	
-				ErrNEG1(  enqId(f->openIds, cid)  );				//Successful OPEN
+				ErrNEG1(  enqId(f->openIds, cid)  );			//Successful OPEN
 				
 				if( cmd.info & O_LOCK ){
-					if( f->lockId!=NOTSET && f->lockId!=cid ){ REPLY(LOCKED); break; }
+					if( f->lockId!=NOTSET && f->lockId!=cid ){   REPLY(LOCKED); LOGOP(LOCKED,cmd.filename,NULL); break; }
 					else f->lockId=cid;			//Successful LOCK
 					}
 					
-				REPLY(OK);
+				REPLY(OK);   LOGOP(OK,cmd.filename,NULL);
 				
 				if( storage->numfiles == MAXNUMFILES ){
-					REPLY(CACHE);
+					REPLY(CACHE); 
 					
 					File* victim=NULL;
 					ErrNULL( victim=rmvLastFile() );
@@ -199,6 +170,7 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 					WRITE(cid, victim->cont, victim->size );
 					WRITE(cid, victim->name, PATH_MAX);
 					
+					LOGOP(CACHE,victim->name, &victim->size);
 					fileDestroy( victim );					
 					}
 					
@@ -216,15 +188,12 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 			case (CLOSE):{
 				printf("CLOSE file '%s'\n", cmd.filename);
 				File* f=getFile(cmd.filename);
-				if( f==NULL){				//ERR: file not found
-						REPLY(NOTFOUND);
-						break;
-						}
+				if( f==NULL){   REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }		//ERR: file not found
 				
-				if( f->lockId==cid) f->lockId=NOTSET;
+				if( f->lockId==cid) f->lockId=NOTSET;		//Eventual UNLOCK before closing
 				
-				if( ! findRmvId(f->openIds, cid)  ){  REPLY(NOTOPEN);  }
-				else REPLY(OK);
+				if( ! findRmvId(f->openIds, cid)  ){  REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); }
+				else{ REPLY(OK); LOGOP(OK,cmd.filename,NULL); }
 				
 				} break;
 
@@ -235,13 +204,13 @@ void* work(void* unused){			//ROUTINE of WORKER THREADS
 ErrLOCAL		
 				printf("starting WRITE file '%s'\n", cmd.filename);	
 				File* f=getFile(cmd.filename);
-				if( f==NULL){ REPLY(NOTFOUND); break; }
+				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
 				
-				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); break; }
+				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
 				
-				if( f->lockId != cid ){	REPLY(NOTLOCKED); break; }
+				if( f->lockId != cid ){	REPLY(NOTLOCKED); LOGOP(NOTLOCKED,cmd.filename,NULL); break; }
 				
-				if( f->cont != NULL ){ REPLY(NOTEMPTY); break; }
+				if( f->cont != NULL ){ REPLY(NOTEMPTY); LOGOP(EMPTY,cmd.filename,NULL); break; }
 				
 				REPLY(OK);
 				
@@ -253,9 +222,8 @@ ErrLOCAL
 				void* cont=NULL;
 				ErrNULL( cont=calloc(1, size) );
 				READ(cid, cont, size);
-				//printf("cont: %s", (char *)cont );
 				
-				if( size > MAXCAPACITY ){ REPLY(TOOBIG); break; }
+				if( size > MAXCAPACITY ){ REPLY(TOOBIG); LOGOP(TOOBIG,cmd.filename,NULL); break; }
 				
 				while( storage->numfiles == MAXNUMFILES  ||  (storage->capacity+size) > MAXCAPACITY ){
 					REPLY(CACHE);
@@ -267,6 +235,7 @@ ErrLOCAL
 					WRITE(cid, victim->cont, victim->size );
 					WRITE(cid, victim->name, PATH_MAX);
 					
+					LOGOP(CACHE,victim->name, &victim->size);
 					fileDestroy( victim );
 					}
 				
@@ -276,7 +245,8 @@ ErrLOCAL
 				storage->capacity+=size;
 				
 				REPLY(OK);
-				
+				size_t* s=&size;				//my MACRO monstrosity doesnt like LOCAL size_t variables
+				LOGOP(OK, cmd.filename, s);
 				break;
 ErrCLEANUP
 				exit(EXIT_FAILURE);
@@ -287,22 +257,22 @@ ErrCLEAN
 ErrLOCAL
 				printf("starting APPEND to file '%s'\n", cmd.filename);	
 				File* f=getFile(cmd.filename);
-				if( f==NULL){ REPLY(NOTFOUND); break; }
+				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
 				
-				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); break; }
+				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
 				
-				if( f->lockId != cid ){	REPLY(NOTLOCKED); break; }
+				if( f->lockId != cid ){	REPLY(NOTLOCKED); LOGOP(NOTLOCKED,cmd.filename,NULL); break; }
 				
 				REPLY(OK);
 				
-				size_t size=0;
+				size_t size=0; 
 				READ(cid, &size, sizeof(size_t));
 				
 				void* buf=NULL;
 				ErrNULL( buf=calloc(1, size) );
 				READ(cid, buf, size);
 				
-				if( size > MAXCAPACITY ){ REPLY(TOOBIG); break; }
+				if( size > MAXCAPACITY ){ REPLY(TOOBIG); LOGOP(TOOBIG,cmd.filename,NULL); break; }
 				
 				while( storage->numfiles == MAXNUMFILES  ||  (storage->capacity+size) > MAXCAPACITY ){
 					REPLY(CACHE);
@@ -314,6 +284,7 @@ ErrLOCAL
 					WRITE(cid, victim->cont, victim->size );
 					WRITE(cid, victim->name, PATH_MAX);
 					
+					LOGOP(CACHE,victim->name, &victim->size);
 					fileDestroy( victim );
 					}
 					
@@ -322,13 +293,14 @@ ErrLOCAL
 				f->cont=extendedcont;
 				memcpy( f->cont+f->size, buf, size );
 				f->size+=size;
-				printf("cont: %s", (char *) f->cont );
 				
 				storage->capacity+=size;
 				
 				free(buf);
 				
 				REPLY(OK);
+				size_t* s=&size;
+				LOGOP(OK, cmd.filename, s);
 				break;
 ErrCLEANUP
 				exit(EXIT_FAILURE);
@@ -342,18 +314,20 @@ ErrCLEAN
 ErrLOCAL
 				printf("starting READ file '%s'\n", cmd.filename);	
 				File* f=getFile(cmd.filename);
-				if( f==NULL){ REPLY(NOTFOUND); break; }
+				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
 				
-				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); break; }
+				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
 				
-				if( f->lockId!=NOTSET && f->lockId!=cid ){ REPLY(LOCKED); break; }
+				if( f->lockId!=NOTSET && f->lockId!=cid ){ REPLY(LOCKED); LOGOP(LOCKED,cmd.filename,NULL); break; }
 				
-				if( f->cont==NULL ){ REPLY(EMPTY); break; }		//cant READ EMPTY files
+				if( f->cont==NULL ){ REPLY(EMPTY); LOGOP(EMPTY,cmd.filename,NULL); break; }		//cant READ EMPTY files
 				
 				REPLY(OK);
 				
 				WRITE(cid, &f->size, sizeof(size_t));
 				WRITE(cid, f->cont, f->size);
+				
+				LOGOP(OK,cmd.filename,&f->size);
 
 				break;
 ErrCLEANUP
@@ -386,18 +360,18 @@ ErrLOCAL
 					WRITE(cid, curr->cont, curr->size);
 					WRITE(cid, curr->name, PATH_MAX);
 					
+					LOGOP(ANOTHER, curr->name , &curr->size);				
 					n_read++;
-					curr=curr->prev;					
+					curr=curr->prev;
 					}
 				
 				REPLY(OK);
-				
+				LOGOP(OK, NULL, NULL);
 				break;
 ErrCLEANUP
 				exit(EXIT_FAILURE);
 ErrCLEAN
-				}
-				break;			
+				} break;			
 		
 		
 		
@@ -406,11 +380,13 @@ ErrCLEAN
 ErrLOCAL
 				printf("starting REMOVE file '%s'\n", cmd.filename);	
 				File* f=getFile(cmd.filename);
-				if( f==NULL){ REPLY(NOTFOUND); break; }
+				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
 					
-				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); break; }
+				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
 				
-				if( f->lockId != cid ){	REPLY(NOTLOCKED); break; }
+				if( f->lockId != cid ){	REPLY(NOTLOCKED); LOGOP(NOTLOCKED,cmd.filename,NULL); break; }
+				
+				LOGOP(OK, cmd.filename, &f->size);
 				
 				ErrNEG1(  rmvThisFile(f)  );
 				
@@ -434,17 +410,19 @@ ErrLOCAL
 				
 				File* f=getFile(cmd.filename);
 				
-				if( f==NULL){ REPLY(NOTFOUND); break; }
+				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
 				
-				if( ! findId( f->openIds, cid) ){ REPLY(NOTOPEN); break; }
+				if( ! findId( f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
 				
-				if( f->lockId!=NOTSET && f->lockId!=cid ){ REPLY(LOCKED); break; }
-				else if( f->lockId==cid ){	REPLY(ALRLOCKED); break; }
+				if( f->lockId!=NOTSET && f->lockId!=cid ){ REPLY(LOCKED); LOGOP(LOCKED,cmd.filename,NULL); break; }
+				
+				if( f->lockId==cid ){ REPLY(ALRLOCKED); LOGOP(ALRLOCKED,cmd.filename,NULL); break; }
 				
 				
 				f->lockId=cid;
 				
 				REPLY(OK);
+				LOGOP(OK,cmd.filename,NULL);
 
 				break;
 ErrCLEANUP
@@ -460,15 +438,16 @@ ErrCLEAN
 ErrLOCAL
 				printf("starting UNLOCK file '%s'\n", cmd.filename);	
 				File* f=getFile(cmd.filename);
-				if( f==NULL){ REPLY(NOTFOUND); break; }
+				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
 				
-				if( ! findId( f->openIds, cid) ){ REPLY(NOTOPEN); break; }
+				if( ! findId( f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
 				
-				if( f->lockId != cid ){ REPLY(NOTLOCKED); break; }
+				if( f->lockId != cid ){ REPLY(NOTLOCKED); LOGOP(NOTLOCKED,cmd.filename,NULL); break; }
 				
 				f->lockId=NOTSET;
 				
 				REPLY(OK);
+				LOGOP(OK,cmd.filename,NULL);
 
 				break;
 ErrCLEANUP
@@ -490,7 +469,7 @@ ErrCLEAN
 										
 					curr=curr->prev;					
 					}
-				quit=true;			
+				disconnecting=true;			
 				}
 				break;
 			
@@ -500,8 +479,11 @@ ErrCLEAN
 			}
 		ErrNZERO(  pthread_rwlock_unlock(&storage->lock)  );
 		
-		if( !quit ){  WRITE( done, &cid, sizeof(int) );  }
-		else printf("Closing connection with client %d\n", cid);   /*	Client CID successfully unconnected */
+		if(disconnecting){
+			LOG("WORK: CLIENT %d DISCONNECTED\n", cid);   /*	Client CID successfully unconnected */
+			cid=DISCONN;
+			}
+		WRITE( done, &cid, sizeof(int) );		// original CID or DISCONNECTION CODE (decrements the number of active clients in main)
 		
 		printf("STORAGE:  ----------------------------\n");
 		storagePrint();
@@ -515,8 +497,8 @@ ErrCLEAN
 
 int spawnworker(){								//worker threads SPAWNER
 	for(int i=0; i<MAXTHREADS-1; i++){
-		CREATE(&tid[i], NULL, work, NULL);		//WORKER THREAD
-		printf("Created worker thread %d\n", i);
+		CREATE(&tid[i], NULL, work, NULL );		//WORKER THREAD
+		LOG("MAIN: CREATED WORKER THREAD #%d\n", i);
 		}
 
 	return 0;
@@ -553,6 +535,14 @@ int main(){
 	ErrNEG1(  sigaction(SIGQUIT,&soft, NULL)  );	// /!\ temp quit in softquit bc it has a keyboard shortcut
 	ErrNEG1(  sigaction(SIGHUP, &soft, NULL)  );
 	
+	/*-------------------------Log-----------------------------*/
+	
+
+//	FILE* Log=NULL;  moved to global
+	ErrNULL(  Log=fopen( LOGPATHN, "w")  );
+//  pthread_mutex_t LogMutex;
+	ErrERRNO(  pthread_mutex_init(&LogMutex, NULL)  );
+	
 	/*------------------------Socket---------------------------*/
 	int sid=NOTSET;
 	ErrNEG1(  sid=socket(AF_UNIX, SOCK_STREAM, 0)  );	//SID: server id (fd), SOCKET assigns it a free channel
@@ -566,7 +556,7 @@ int main(){
 	
 	ErrNEG1( listen(sid, BACKLOG)  );							//sets socket in LISTEN mode
 	
-	printf("Server started\n");
+	LOG("MAIN: SOCKET OPENED\n");
 	
 	/*-------------------Pending-queue/Done-pipe---------------*/
 	ErrNULL(  pending=idListCreate()  );				//PENDING queue
@@ -574,7 +564,7 @@ int main(){
 	if( mkfifo("./done", 0777) != 0){				//DONE named pipe
 		if( errno != EEXIST){
 			perror("Error: couldnt create named pipe\n");
-			ErrFAIL;
+			ErrSHHH;
 			}
 		}
 	ErrNEG1(  done=open("./done", O_RDWR)  );
@@ -594,49 +584,54 @@ int main(){
 	
 	ErrNEG1(  spawnworker()  );			//spawns WORKER THREADS
 
-	printf("Server ready\n");
+	LOG("MAIN: SERVER READY\n");
 	
 	
 	/*---------------------Manager-loop------------------------*/
+	int activeCid=0;
 	
 	while( Status!=OFF ){
 		rdy=all;
 		int nrdy=0;	//select returns the number of rdy fds				//select "destroys" the fd that arent rdy
 		/*nrdy=*/PSELECT(FD_SETSIZE, &rdy, NULL, NULL, NULL, &oldmask);		// pselect( n, read, write, err, timeout, signals)
-		printf("select done\n");
 		
 		if( nrdy>0){							//if <=0 the select has been triggered by one of the installed signals and the FD cycle is skipped
 			for(int i=0; i<=maxid; i++){
 				if( FD_ISSET( i, &rdy) ){
-					printf("----------\nfd: %d\n", i);
 					if( i==sid && Status==ON){				//the server socket (sid) has a pending request and is ready to accept it
 						int cid;							//	but only if the server is not in SOFT QUIT mode (Status==NOCONN)
-						ACCEPT(cid, sid, NULL, NULL);
+						ACCEPT(cid, sid, NULL, NULL );
 						FD_SET(cid, &all);
 						if(cid>maxid) maxid=cid;
-						printf("accepted client %d\n", cid);
+						activeCid++;
+						LOG("MAIN: ACCEPTED NEW CLIENT %d\n", cid);
 						}
 					else if( i==done){			//the named pipe containing the finished requests has a cid that must return in the controlled set
 						int cid;
 						READ(done, &cid, sizeof(int));
-						FD_SET(cid, &all);
-						printf("received back client %d\n", cid);
+						if( cid==DISCONN ){
+							activeCid--;
+							}
+						else FD_SET(cid, &all);
+							//printf("received back client %d\n", cid);
 						}
 					else{									//one of the clients has something that the server has to read
 						FD_CLR( i, &all);
 						enqId(pending, i);
-						printf("serving client %d\n", i);
 						}				
 					}
 				}
 			}
-		}		//TODO SOFT QUIT way to break out of loop
+		if( Status==SOFT && activeCid==0) break; 
+		}
 
 	for( int i=0; i<MAXTHREADS-1; i++)
 		enqId(pending, TERMINATE);
 		
-	for( int i=0; i<MAXTHREADS-1; i++)
+	for( int i=0; i<MAXTHREADS-1; i++){
 		ErrERRNO(  pthread_join( tid[i], NULL)  );
+		LOG("MAIN: THREAD #%d JOINED\n", i);
+		}
 	
 	ErrNEG1(  storageDestroy()       );
 	ErrNEG1(  unlink(FIFOPATHN)      );
@@ -644,8 +639,9 @@ int main(){
 	ErrNEG1(  idListDestroy(pending) );
 	ErrNEG1(  unlink(SOCKETPATHN)    );
 	ErrNEG1(  close(sid)             );
-										
-	printf("\nServer successfully closed\n");
+	LOG("MAIN: SERVER SUCCESSFULLY CLOSED\n");
+	ErrERRNO(  pthread_mutex_destroy(&LogMutex) );
+	ErrNZERO(  fclose(Log)  );
 	return 0;
 	
 ErrCLEANUP
@@ -655,6 +651,10 @@ ErrCLEANUP
 	if(pending) idListDestroy(pending);
 	unlink(SOCKETPATHN);
 	if(sid!=NOTSET) close(sid);
+	pthread_mutex_destroy(&LogMutex);
+	LOG("MAIN: SERVER ERROR (CLEANUP DONE)\n");
+	fflush(Log);
+	if(Log) fclose(Log);
 	exit(EXIT_FAILURE);
 ErrCLEAN
 	}

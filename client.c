@@ -7,6 +7,7 @@
 #include <limits.h>
 #include <dirent.h>
 #include <sys/stat.h>
+#include <stdbool.h>
 
 #include "./api.h"
 #include "./utils.h"		//READ(), WRITE(), FREAD(), FWRITE()
@@ -17,9 +18,9 @@
 
 //Used for API calls inside the main command execution while loop
 //on ERROR: PRINTS API  BREAKS out of switch loop, PRINTS ERROR and SLEEPS (as much as required by -t OPTION) / on SUCCESS: SLEEPS anyway
-#define ErrAPI( rv ){						\
-	if( (rv)==-1 ){							\
-		fprintf( stderr, "Error: -%c %s FAILED (ERRNO=%d) %s\n", curr->cmd, file, errno, strerror(errno) );		\
+#define ErrAPI( call ){						\
+	if( (call)==-1 ){						\
+		fprintf( stderr, "Error: (-%c) %s FAILED (ERRNO=%d) %s\n", curr->cmd, file, errno, strerror(errno) );		\
 		nanosleep(&sleeptime, NULL);		\
 		break;								\
 		}									\
@@ -27,19 +28,22 @@
 	}
 
 //like the previous one but CONTINUES (eg: inside while )
-#define ErrSDIR( rv ){						\
-	if( (rv)==-1){							\
-		fprintf( stderr, "Error: -%s on file %s FAILED (ERRNO=%d) %s\n", #rv, ent->d_name, errno, strerror(errno) );		\
+#define ErrSDIR( call ){					\
+	if( (call)==-1){						\
+		fprintf( stderr, "Error: %s on file %s FAILED (ERRNO=%d) %s\n", #call, ent->d_name, errno, strerror(errno) );		\
 		nanosleep(&sleeptime, NULL);		\
 		continue;							\
 		}									\
 	else nanosleep(&sleeptime, NULL);		\
 	}
 
-bool printmode=false;
 char* trashdir=NULL;
 int n_w=-1;
 struct timespec sleeptime;
+
+static inline double timespectot( struct timespec* t){
+	return t->tv_sec+(t->tv_nsec/1000000000.0);
+	}
 
 int SENDdir(char* senddir){		//used in -w option
 	
@@ -69,11 +73,12 @@ int SENDdir(char* senddir){		//used in -w option
 		if( strcmp(ent->d_name,".")!=0  &&  strcmp(ent->d_name,"..")!=0 ){
 			if( S_ISDIR(entstat.st_mode) ) n_sent+= SENDdir(entpathname);
 			else{
-				n_w--;
-				n_sent++;
-				ErrSDIR(  openFile(  entpathname, O_CREATE | O_LOCK, trashdir)  );		//nanosleep(&sleeptime, NULL) bundled inside ErrSDIR
-				ErrSDIR(  writeFile( entpathname, trashdir)  );
-				ErrSDIR(  closeFile( entpathname)  );
+				n_w--;			//with these increments here the behaviour is:	do N WRITE ATTEMPTS
+				n_sent++;		//if these are moved after the 3 API CALLS:		do N SUCCESSFUL WRITES
+				if(PRINT) printf("\n\tCREATE>WRITE>CLOSE of FILE %s\n", entpathname);
+				ErrSDIR(  openFile(  entpathname, O_CREATE | O_LOCK, trashdir)  );	if(PRINT) printf("\tOPEN: SUCCESS\n");
+				ErrSDIR(  writeFile( entpathname, trashdir)  );						if(PRINT) printf("\tWRITE: SUCCESS");
+				ErrSDIR(  closeFile( entpathname)  );								if(PRINT) printf("\tCLOSE: SUCCESS\n");
 				}
 			}
 		}
@@ -91,7 +96,7 @@ ErrCLEAN
 int main (int argc, char **argv){
 
 	char* 	socketname=NULL;
-/*	bool */	printmode=false;		//moved to global bc used inside -w SENDdir()
+/*	bool */	PRINT=false;		//moved to API.h bc its needed inside the API to print the SIZEs on some actions
 	
 	bool found_h=false;
 	bool found_f=false;
@@ -135,7 +140,7 @@ int main (int argc, char **argv){
 			
 			case 'p':
 				if( found_p){ fprintf(stderr,"Warning: print mode already specified, ignored\n"); break; }
-				printmode=true;
+				PRINT=true;
 				found_p=true;
 				break;
 						
@@ -198,9 +203,9 @@ int main (int argc, char **argv){
 
 
 	char* readdir=NULL;
-/*	char* */trashdir=NULL;															//moved to global bc used inside -w SENDdir()
+/*	char* */trashdir=NULL;														//moved to global bc used inside -w auxiliary function ( SENDdir() )
 	
-/*	static struct timespec sleeptime;	*/	//INTERVAL time between two API calls	//moved to global bc used inside -w SENDdir()
+/*	static struct timespec sleeptime;	*///INTERVAL time between two API calls	//moved to global bc used inside -w SENDdir()
 	sleeptime.tv_sec=0;
 	sleeptime.tv_nsec=0;
 	
@@ -214,7 +219,9 @@ int main (int argc, char **argv){
 	
 	Opt* curr=NULL;
 	while(	(curr=deqOpt()) !=NULL){
+		if(PRINT) printf("------------------ -%c:\n", curr->cmd);
 		char* file=NULL; 		//used in the nested while loop when tokenizing each argument in single files
+		int r=-1;				//used as RETURN VALUE in most API CALLS: needed to store a RV for PRINT MODE
 		
 		char* argcpy=NULL;
 		if(curr->arglist!=NULL)
@@ -232,16 +239,22 @@ int main (int argc, char **argv){
 				else{
 					sleeptime.tv_sec=  msec/1000;
 					sleeptime.tv_nsec=(msec%1000)*1000000;
+					
+					if(PRINT) printf("CMD: Updated TIME DELTA: %f\n", timespectot(&sleeptime) );
 					}
 				} break;	
 			
 			
 			case 'd':		// -d updates readdir directory path
-				readdir=strdupa(argcpy); break;
+				readdir=strdupa(argcpy); 
+				if(PRINT) printf("CMD: Updated READ DIRECTORY: %s\n", readdir );
+				break;
 			
 			
 			case 'D':		// -D updates trashdir directory path
-				trashdir=strdupa(argcpy); break;
+				trashdir=strdupa(argcpy);
+				if(PRINT) printf("CMD: Updated CACHE EJECTION DIRECTORY: %s\n", readdir );				
+				break;
 			
 			
 			
@@ -254,13 +267,19 @@ int main (int argc, char **argv){
 						}
 					else{
 						n_R=atoi(argcpy);		//if n specified correctly: send at most n files
-						if(n_w==0) n_w=-1;		// because 0 means send all files
+						if(n_R==0) n_R=-1;		// because 0 means send all files
 						}
 					}
 				
+				if(PRINT) printf("REQ: BULK READ of %s FILES from FSS\n\n", n_R<0 ? "ALL" : argcpy );
+				
 				int n_read;
 				ErrAPI(  n_read=readNFiles( n_R, readdir)  ); // API CALL (eventual ERR PRINTING and immediate BREAK) (SLEEPS in both cases)
-				printf(" %d files read from FSS\n", n_read);
+				
+				if(PRINT){
+					if(n_read<0) printf("ERR: BULK READ NOT COMPLETED\n");
+					else       printf("\nRES: %d FILES READ SUCCESSFULLY\n", n_read);
+					}
 				} break;
 				
 			
@@ -286,10 +305,16 @@ int main (int argc, char **argv){
 						if(n_w==0) n_w=-1;		// because 0 means send all files
 						}
 					}
+					
+				if(PRINT) printf("REQ: FULL DIR WRITE of at most %s FILES from DIR %s\n", n_w<0 ? "ALL" : argcpy, senddir);
 				
 				int n_sent;
 				ErrAPI(  n_sent=SENDdir(senddir)  );
-				if(n_sent>=0) printf(" %d files sent to FSS\n", n_sent);
+				
+				if(PRINT){
+					if(n_sent<0) printf("ERR: DIR WRITE NOT COMPLETED\n");
+					else       printf("\nRES: %d FILES SENT SUCCESSFULLY\n", n_sent);
+					}
 				} break;
 			
 			
@@ -323,10 +348,14 @@ int main (int argc, char **argv){
 				void* cont=NULL;
 				ErrNULL(  cont=calloc(1, size)  );			//ERR: malloc failure (malloc SETS ERRNO=ENOMEM)
 				FREAD(cont, size, 1, source);					//ERR: file read failure (freadfull SETS ERRNO=EIO)
-				
-				ErrAPI(  appendToFile( dest, cont, size, trashdir)  );		
 				ErrNZERO(  fclose(source)  );					//ERR: fclose() returns EOF on error (SETS ERRNO)
 				
+				if(PRINT) printf("API: APPEND FILE %s to FILE %s", src, dest);
+				ErrAPI(  r=appendToFile( dest, cont, size, trashdir)  );
+				if(PRINT){
+					if(r<0) printf("ERR: APPEND FAILED\n");
+					else    printf("RES: SUCCESS\t %zuB WRITTEN\n", size);
+					}
 			SUCCESS
 				break;
 			ErrCLEANUP
@@ -346,40 +375,46 @@ int main (int argc, char **argv){
 
 					switch(curr->cmd){										//call the API function relative to the current OPT
 						case 'W':
-							ErrAPI(  openFile(  file, O_CREATE | O_LOCK, trashdir)  );	//nanosleep(&sleeptime, NULL) bundled inside ErrAPI
-							ErrAPI(  writeFile( file, trashdir)  );
-							ErrAPI(  closeFile( file)  );		
+							if(PRINT) printf("REQ: CREATE>WRITE>CLOSE of FILE %s\n", file);
+							
+							ErrAPI(  openFile(  file, O_CREATE | O_LOCK, trashdir)  );	if(PRINT) printf("\tOPEN: SUCCESS\n");
+							ErrAPI(  writeFile( file, trashdir)  );						if(PRINT) printf("\tWRITE: SUCCESS");
+							ErrAPI(  closeFile( file)  );								if(PRINT) printf("\tCLOSE: SUCCESS\n");
 							break;
 						
 						case 'r':
-							ErrAPI(  openFile( file, 0, trashdir)  );
-							ErrAPI(  readFile( file, &readbuf, &readsize)  );
-							//printf("CONT: %s, SIZE: %d, PATHNAME: %s, SAVEDIR: %s\n", (char*)readbuf, readsize, file, readdir);
-							ErrNEG1(  SAVEfile( readbuf, readsize, file, readdir)  );
+							if(PRINT) printf("REQ: OPEN>READ>CLOSE of FILE %s\n", file);
+							ErrAPI(  openFile( file, 0, trashdir)  );					if(PRINT) printf("\tOPEN: SUCCESS\n");
+							ErrAPI(  readFile( file, &readbuf, &readsize)  );			if(PRINT) printf("\tREAD: SUCCESS");
+
+							ErrNEG1(  SAVEfile( readbuf, readsize, file, readdir)  );	if(PRINT) printf("\t %zuB READ", readsize);
 							
-							ErrAPI(  closeFile( file)  );
+							ErrAPI(  closeFile( file)  );								if(PRINT) printf("\tCLOSE: SUCCESS\n");
 							break;
 						
 						case 'l':
-							ErrAPI(  openFile( file, 0, trashdir)  );
-							ErrAPI(  lockFile( file)  );
+							if(PRINT) printf("REQ: OPEN>LOCK of FILE %s\n", file);
+							ErrAPI(  openFile( file, 0, trashdir)  );					if(PRINT) printf("\tOPEN: SUCCESS\n");
+							ErrAPI(  lockFile( file)  );								if(PRINT) printf("\tLOCK: SUCCESS\n");
 							break;
 							
 						case 'u':
+							if(PRINT) printf("REQ: UNLOCK>CLOSE of FILE %s\n", file);
 							ErrAPI(  unlockFile( file)  );
 							ErrAPI(  closeFile( file)  );
 							break;
 						
 						case 'c':
-							ErrAPI(  removeFile( file)  );
+							if(PRINT) printf("REQ: REMOVAL of FILE %s\n", file);
+							ErrAPI(  removeFile( file)  );								if(PRINT) printf("\tREMOVE: SUCCESS\n");
 							break;
 						}
+					if(PRINT) printf("\n");
 					}
 				} break;
 				
 				
 			}
-		
 		free(curr);		//Destroys the dequeued OPT NODE
 		}
 		

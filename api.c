@@ -20,8 +20,6 @@
 int sid=NOTSET;		//Server ID
 char* connsocket=NULL;
 
-bool print=false;
-
 /*-------------------------------------------------INTERNAL USE------------------------------------------------------*/
 /*---------------------------------------------Frequently Used Code--------------------------------------------------*/	
 
@@ -156,10 +154,11 @@ static int SENDfile(const char* pathname){
 	
 	FREAD(cont, size, 1, file);						//ERR: file read failure (freadfull SETS ERRNO=EIO)
 	
-	//printf("cont: %s\n", (char*)cont);
 
 	WRITE(sid, &size, sizeof(size_t));
 	WRITE(sid, cont, size);							//ERR: write error while sending data to server
+	
+	if(PRINT) printf("\t %zuB WRITTEN\n", size);
 	
 SUCCESS
 	fclose(file);
@@ -187,8 +186,10 @@ static int RECVfile(const char* savedir){
 	ErrNULL(  pathname=malloc(PATH_MAX) );			//ERR: ...
 	READ( sid, pathname, PATH_MAX);					//an extra READ is needed from SERVER to get the file PATHNAME (+sets a flag to remember this)
 	
+	if(PRINT) printf("%s\t %zuB READ\n", pathname, size);
+	
 	if( savedir!=NULL )				//if a TRASH/SAVE DIR has been specified the file gets written in a file in it	
-		SAVEfile( cont, size, pathname, savedir);
+		ErrNEG1(  SAVEfile( cont, size, pathname, savedir)  );
 
 	free(cont);
 	free(pathname);
@@ -208,9 +209,10 @@ static int CACHEretrieve( const char* trashdir){
 		
 		if(reply==OK) break;			//EXIT COND: this means that all excess files have been EJECTED from the FSS
 		else if( reply==CACHE){			//OTHERWISE: keep receiving the files from the FSS
+			if(PRINT) printf("CACHE: RECEIVING FILE ");
 			ErrNEG1(  RECVfile(trashdir)  );
 			}
-		else errReply(reply, "unknown");
+		//else errReply(reply, "unknown");
 		}
 SUCCESS
 	return 0;
@@ -377,6 +379,7 @@ int readNFiles( int n, const char* readdir){
 		
 		if ( reply==OK) break;			//exit condition: this means that all requested files have been sent back to the client
 		else if( reply==ANOTHER){
+			if(PRINT) printf("\tRECEIVING FILE ");
 			ErrNEG1(  RECVfile(readdir)  );
 			read++;
 			}

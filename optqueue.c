@@ -36,7 +36,7 @@ int optQueueDestroy(){
 	
 	while( curr!=NULL){
 		temp=curr->prev;
-		optDestroy(curr);
+		free(curr);
 		curr=temp;
 		}
 		
