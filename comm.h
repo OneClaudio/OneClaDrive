@@ -2,7 +2,7 @@
 #include <linux/limits.h>	//PATH_MAX
 
 typedef enum CmdCode{
-//	IDLE    ,
+	IDLE    ,
 	OPEN	,
 	CLOSE	,
 	WRITE	,
@@ -27,6 +27,7 @@ typedef enum Reply{
 	ALROPEN	   ,
 	NOTLOCKED  ,
 	ALRLOCKED  ,
+	EMPTY	   ,
 	NOTEMPTY   ,
 	TOOBIG
 	} Reply;

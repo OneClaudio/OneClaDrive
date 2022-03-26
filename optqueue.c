@@ -3,11 +3,12 @@
 #include <errno.h>
 
 #include "./optqueue.h"
+#include "./errcheck.h"
 
 /*
 typedef struct Opt{			//LIST Opt	contains:
-    int cmd;							// single char represents command OPTIONS
-    char* arglist;						// comma separated list of ARGUMENTS to the option
+    int cmd;						// single char represents command OPTIONS
+    char* arglist;					// comma separated list of ARGUMENTS to the option
     struct Opt* prev;				// ptr to PREVIOUS Opt
 	} Opt;
 
@@ -17,68 +18,67 @@ typedef struct OptQueue{
 										//    ^					  ^
 	} OptQueue;							//   first				last		*/
 
+
 int optQueueCreate(){
-    optQueue=malloc(sizeof(OptQueue));
-    if(optQueue==NULL) return -1;
+    ErrNULL(  optQueue=malloc(sizeof(OptQueue))  );
 
     optQueue->first = NULL;
     optQueue->last  = NULL;
-    return 0;
+    SUCCESS    return  0;
+    ErrCLEANUP return -1; ErrCLEAN
 	}
 
 
-int optQueueDestroy(){		//dealocates a THREAD SAFE LIST
+int optQueueDestroy(){
+	ErrNULL( optQueue );
+	Opt* curr=optQueue->last;
+	Opt* temp;
 	
-	Opt* curr;
-	while( (curr=deqOpt( optQueue)) !=NULL);
-		free(curr);
+	while( curr!=NULL){
+		temp=curr->prev;
+		optDestroy(curr);
+		curr=temp;
+		}
 		
 	free(optQueue);
-	return 0;
+    SUCCESS    return  0;
+    ErrCLEANUP return -1; ErrCLEAN
 	}
 
 	
 int enqOpt(int cmd, char* arglist){
-    Opt* new=malloc(sizeof(struct Opt));
-    if(new==NULL){
-    	errno=ENOMEM;
-    	fprintf(stderr,"Error: malloc inside OptQueue enqOpt() call\n");
-    	return -1;
-    	}
+    Opt* new=NULL;
+    ErrNULL(  new=malloc(sizeof(struct Opt))  );
     	
     new->cmd=cmd;
-    new->arglist=arglist;
+    new->arglist=arglist;	// /!\ ARGLIST member only receives COMMAND LINE ARGUMENTS (from argv[]): they are FREEd AUTOMATICALLY
     new->prev=NULL;
 
     if (optQueue->first==NULL){					//if QUEUE EMPTY first and last point to the new element
         optQueue->first=new;
         optQueue->last=new;
     	}
-    else{        										//QUEUE has MULTIPLE NODES
-        optQueue->first->prev=new;						//the first becomes the second in the optQueue
-        optQueue->first=new;							//the new node becomes the first
+    else{        								//if QUEUE has MULTIPLE NODES
+        optQueue->first->prev=new;					//the first becomes the second in the optQueue
+        optQueue->first=new;						//the new node becomes the first
         }
 
-    return 0;
+	SUCCESS    return  0;
+    ErrCLEANUP return -1; ErrCLEAN
 	}
 
 Opt* deqOpt(){
     Opt* curr=optQueue->last;
     
-	if(curr == NULL) return NULL;			//if the QUEUE is EMPTY returns NULL
+	if(curr == NULL) return NULL;				//if the QUEUE is EMPTY returns NULL: OPTIONS LIST FULLY PARSED
 														
-	if(optQueue->first==optQueue->last){			//if curr is the last node in the optQueue, the first and last are resetted to null (initial state)
-		optQueue->first=NULL;						//QUEUE has 1 NODE
+	if(optQueue->first==optQueue->last){		//if CURR is the ONLY NODE LEFT in the optQueue, the first and last are resetted to NULL (EMPTY state)
+		optQueue->first=NULL;
 		optQueue->last=NULL;
 		}
-	else optQueue->last = optQueue->last->prev;		//QUEUE has MULTIPLE NODES
+	else optQueue->last=optQueue->last->prev;	//if the QUEUE has MULTIPLE NODES
     
     curr->prev=NULL;
     
-    return curr;
-	}
-
-void optDestroy(Opt* victim){
-	if( victim->arglist) free(victim->arglist);
-	free(victim);
+    return curr;								//the CALLER is in charge of freeing the OPT using optDestroy()
 	}

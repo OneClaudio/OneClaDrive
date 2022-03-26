@@ -13,19 +13,26 @@
 #include "./errcheck.h"
 #include "./optqueue.h"
 
-#define SPATHNAME "./server_sol"
+#define SOCKETPATHN "./server_sol"
 
 //Used for API calls inside the main command execution while loop
-//silently BREAKS out of loop: SKIPS the additional errno printings and disruptive behav inside ErrNEG1 for all API calls
-//																  (the API already prints all non disruptive logic errors)
-#define ErrBREAK( rv ){						\
-	if( (rv)==-1 ) break;					\
+//on ERROR: PRINTS API  BREAKS out of switch loop, PRINTS ERROR and SLEEPS (as much as required by -t OPTION) / on SUCCESS: SLEEPS anyway
+#define ErrAPI( rv ){						\
+	if( (rv)==-1 ){							\
+		fprintf( stderr, "Error: -%c %s FAILED (ERRNO=%d) %s\n", curr->cmd, file, errno, strerror(errno) );		\
+		nanosleep(&sleeptime, NULL);		\
+		break;								\
+		}									\
 	else nanosleep(&sleeptime, NULL);		\
 	}
 
-//like the previous one but silently CONTINUES loop
-#define ErrCONT( rv ){						\
-	if( (rv)==-1) continue;					\
+//like the previous one but CONTINUES (eg: inside while )
+#define ErrSDIR( rv ){						\
+	if( (rv)==-1){							\
+		fprintf( stderr, "Error: -%s on file %s FAILED (ERRNO=%d) %s\n", #rv, ent->d_name, errno, strerror(errno) );		\
+		nanosleep(&sleeptime, NULL);		\
+		continue;							\
+		}									\
 	else nanosleep(&sleeptime, NULL);		\
 	}
 
@@ -64,9 +71,9 @@ int SENDdir(char* senddir){		//used in -w option
 			else{
 				n_w--;
 				n_sent++;
-				ErrCONT(  openFile(  entpathname, O_CREATE | O_LOCK, trashdir)  );		//nanosleep(&sleeptime, NULL) bundled inside ErrBREAK
-				ErrCONT(  writeFile( entpathname, trashdir)  );
-				ErrCONT(  closeFile( entpathname)  ); 
+				ErrSDIR(  openFile(  entpathname, O_CREATE | O_LOCK, trashdir)  );		//nanosleep(&sleeptime, NULL) bundled inside ErrSDIR
+				ErrSDIR(  writeFile( entpathname, trashdir)  );
+				ErrSDIR(  closeFile( entpathname)  );
 				}
 			}
 		}
@@ -76,8 +83,8 @@ int SENDdir(char* senddir){		//used in -w option
 	return n_sent;
 		
 ErrCLEANUP
-	fprintf(stderr,"Error: -w failed after %d files sent\n", n_sent);
-	return -1; //->zero
+	if(dir) closedir(dir);
+	return -1;
 ErrCLEAN
 	}
 
@@ -96,7 +103,7 @@ int main (int argc, char **argv){
 	while( (opt=getopt(argc, argv, ":w:W:a:r:R::l:u:c:d:D:t:f:ph"))!= -1){	/*
 															: 	-> 1 argomento obbligatorio
 															:: 	-> 1 argomento opzionale
-															"nm"-> nessun argomento
+															"ph"-> nessun argomento
 															-1	-> finite le opzioni
 															
 															first ':' -> serve per riconoscere il "missing argument" ma funziona solo sull'ultima opt
@@ -115,15 +122,10 @@ int main (int argc, char **argv){
             case 'c':
             case 'd':
             case 'D':
-            case 't':
+            case 't':									//-R uses the optional argument '::' => 'optarg' can be NULL and it's correct behaviour
+            case 'R':									// /!\ only works if the arg is adjacent to '-R' ES OK:'-R3'  ERR:'-R 3' 3 unknown arg
             	enqOpt( opt, optarg);
-            	break;
-
-			case 'R':								//	-R uses the optional argument '::'
-													//		only works if the arg is attached to '-R'	es: '-R3' OK, '-R 3' ERR: 3 unknown arg
-				if( optarg==NULL) enqOpt( opt, NULL);
-				else              enqOpt( opt, optarg);
-				break;			
+            	break;			
 				
 			case 'f':
 				if( found_f ){ fprintf(stderr,"Warning: socket pathname already specified, ignored\n"); break; }
@@ -165,21 +167,15 @@ int main (int argc, char **argv){
 				
 			 case ':':		
   				printf("L'opzione '-%c' richiede un argomento\n", optopt);
-  				errno=EINVAL;
-  				return -1;
-				break;
+  				return -1; break;
 			
 			case('?'):
 				printf("Opzione '-%c' non riconosciuta.\n", optopt);
-				errno=EINVAL;
-				return -1;
-				break;		
+				return -1; break;		
 			
 			default:
 				printf("Come sei finito qui?\n");
-				errno=EPERM;
-				return -1;
-				break;	
+				errno=EPERM; break;	
 			}
 		}
 	
@@ -199,10 +195,7 @@ int main (int argc, char **argv){
 					   "\t'-R3  ': read at most 3 files\n"
 					   "\t'-R 3 ': '3' not recognized, could break all subsequent cmd line options, behaves like '-R  '\n"); 
 		}
-	
-	if(socketname==NULL) socketname=SPATHNAME;
-	
-	ErrNEG1(  ezOpen(socketname)  );
+
 
 	char* readdir=NULL;
 /*	char* */trashdir=NULL;															//moved to global bc used inside -w SENDdir()
@@ -215,17 +208,22 @@ int main (int argc, char **argv){
 	size_t readsize=0;
 	
 	
-	
+	if(socketname==NULL) socketname=SOCKETPATHN;	//TODO choose if leaving this here or force -f option to specify the socketname
+	ErrNEG1(  openConnection(socketname, 0, sleeptime)  );		//ignoring the timed connection for now
 	
 	
 	Opt* curr=NULL;
 	while(	(curr=deqOpt()) !=NULL){
-		ErrLOCAL;
+		char* file=NULL; 		//used in the nested while loop when tokenizing each argument in single files
+		
 		char* argcpy=NULL;
 		if(curr->arglist!=NULL)
-			argcpy=strdupa(curr->arglist);
+			argcpy=strdupa(curr->arglist);		//AUTOMATIC STRDUP noice
 		
 		switch(curr->cmd){
+		
+		
+		
 			case 't':{		// -t updates sleeptime timer (in milliseconds)
 				int msec=0;
 				if( !isNumber(argcpy) )	fprintf(stderr, "Warning: argument of '-t' is NaN (milliseconds), sleep time unchanged\n");
@@ -237,8 +235,10 @@ int main (int argc, char **argv){
 					}
 				} break;	
 			
+			
 			case 'd':		// -d updates readdir directory path
 				readdir=strdupa(argcpy); break;
+			
 			
 			case 'D':		// -D updates trashdir directory path
 				trashdir=strdupa(argcpy); break;
@@ -259,15 +259,15 @@ int main (int argc, char **argv){
 					}
 				
 				int n_read;
-				ErrBREAK(  n_read=readNFiles( n_R, readdir)  );
+				ErrAPI(  n_read=readNFiles( n_R, readdir)  ); // API CALL (eventual ERR PRINTING and immediate BREAK) (SLEEPS in both cases)
 				printf(" %d files read from FSS\n", n_read);
 				} break;
 				
 			
+			
 			case 'w':{		// -W has a single arg or 2 comma separated args
 				char* senddir=strtok_r(argcpy,",",&argcpy);	//it's impossible that is NULL
 				char* n_str=strtok_r(argcpy,",",&argcpy);
-				printf("NSTR=%s\n", n_str);
 				
 				if( strtok_r(argcpy,",",&argcpy) != NULL ){
 					fprintf(stderr,"Error: -W option has more than 2 arguments in its argument list\n");
@@ -275,7 +275,7 @@ int main (int argc, char **argv){
 					}
 					
 			/*  int n_w;	*/					//moved to global bc used inside -w SENDdir()
-				n_w=-1;					//default behaviour: send all files (gets dSAVEfileecremented indefinitely inside SENDdir)
+				n_w=-1;					//default behaviour: send all files (gets decremented indefinitely inside SENDdir)
 				if( n_str!=NULL){
 					if( !isNumber(n_str) ){
 						fprintf(stderr,"Warning: second arg of '-W' is NaN\n");
@@ -287,13 +287,15 @@ int main (int argc, char **argv){
 						}
 					}
 				
-				printf("N=%d\n", n_w);
 				int n_sent;
-				ErrBREAK(  n_sent=SENDdir(senddir)  );
-				printf(" %d files sent to FSS\n", n_sent);
+				ErrAPI(  n_sent=SENDdir(senddir)  );
+				if(n_sent>=0) printf(" %d files sent to FSS\n", n_sent);
 				} break;
 			
+			
+			
 			case 'a':{		// -a has 2 comma separated args
+				ErrLOCAL
 				char* src=strtok_r(argcpy,",",&argcpy);
 				char* dest=strtok_r(argcpy,",",&argcpy);
 				if( dest==NULL){
@@ -305,10 +307,10 @@ int main (int argc, char **argv){
 					break;
 					}
 				
-				FILE* file=fopen(src, "r");		
-				if(file==NULL){								//ERR: file not found or other (fopen SETS ERRNO)
+				FILE* source=fopen(src, "r");		
+				if(source==NULL){								//ERR: file not found or other (fopen SETS ERRNO)
 					if(errno==ENOENT){
-						fprintf(stderr, "Error: file doesnt exist, skipping command\n");
+						fprintf(stderr, "Error: file to append doesnt exist, skipping command\n");
 						break;
 						}
 					else ErrFAIL;
@@ -320,73 +322,75 @@ int main (int argc, char **argv){
 	
 				void* cont=NULL;
 				ErrNULL(  cont=calloc(1, size)  );			//ERR: malloc failure (malloc SETS ERRNO=ENOMEM)
-				FREAD(cont, size, 1, file);					//ERR: file read failure (freadfull SETS ERRNO=EIO)
+				FREAD(cont, size, 1, source);					//ERR: file read failure (freadfull SETS ERRNO=EIO)
 				
-				ErrBREAK(  appendToFile( dest, cont, size, trashdir)  );				
-				} break;
+				ErrAPI(  appendToFile( dest, cont, size, trashdir)  );		
+				ErrNZERO(  fclose(source)  );					//ERR: fclose() returns EOF on error (SETS ERRNO)
 				
+			SUCCESS
+				break;
+			ErrCLEANUP
+				if(source){
+					fflush(source);
+					fclose(source);
+					}
+				break;
+			ErrCLEAN		
+				}
+				
+			
 			
 			default:{		// -w -r -l -u -c  all these have a comma separated list of arguments
 				char* file=NULL;
-				while( (file=strtok_r( argcpy, ",", &argcpy)) !=NULL ){		//for each arg:
-					ErrLOCAL;
+				while( (file=strtok_r( argcpy, ",", &argcpy)) !=NULL ){		//FOR EACH FILE in its arglist:
 
-					switch(curr->cmd){
+					switch(curr->cmd){										//call the API function relative to the current OPT
 						case 'W':
-							ErrBREAK(  openFile(  file, O_CREATE | O_LOCK, trashdir)  );	//nanosleep(&sleeptime, NULL) bundled inside ErrBREAK
-							ErrBREAK(  writeFile( file, trashdir)  );
-							ErrBREAK(  closeFile( file)  );
+							ErrAPI(  openFile(  file, O_CREATE | O_LOCK, trashdir)  );	//nanosleep(&sleeptime, NULL) bundled inside ErrAPI
+							ErrAPI(  writeFile( file, trashdir)  );
+							ErrAPI(  closeFile( file)  );		
 							break;
 						
 						case 'r':
-							ErrBREAK(  openFile( file, 0, trashdir)  );
-							ErrBREAK(  readFile( file, &readbuf, &readsize)  );
-							
+							ErrAPI(  openFile( file, 0, trashdir)  );
+							ErrAPI(  readFile( file, &readbuf, &readsize)  );
 							//printf("CONT: %s, SIZE: %d, PATHNAME: %s, SAVEDIR: %s\n", (char*)readbuf, readsize, file, readdir);
 							ErrNEG1(  SAVEfile( readbuf, readsize, file, readdir)  );
 							
-							ErrBREAK(  closeFile( file)  );
+							ErrAPI(  closeFile( file)  );
 							break;
 						
 						case 'l':
-							ErrBREAK(  openFile( file, 0, trashdir)  );
-							ErrBREAK(  lockFile( file)  );
+							ErrAPI(  openFile( file, 0, trashdir)  );
+							ErrAPI(  lockFile( file)  );
 							break;
 							
 						case 'u':
-							ErrBREAK(  unlockFile( file)  );
-							ErrBREAK(  closeFile( file)  );
+							ErrAPI(  unlockFile( file)  );
+							ErrAPI(  closeFile( file)  );
 							break;
 						
 						case 'c':
-							ErrBREAK(  removeFile( file)  );
+							ErrAPI(  removeFile( file)  );
 							break;
 						}
-					//free(file)????		//TODO check leaks with valgrind
-				
-					continue;
-					ErrCLEANUP				//TODO better break jumps error msg etc
-					fprintf( stderr, "Error: -%c %s FAILED (ERRNO=%d) %s\n", curr->cmd, file, errno, strerror(errno) );
-					//free(file);
-					//optDestroy(curr);
-					break;
-					ErrCLEAN
 					}
-				}
+				} break;
+				
+				
 			}
-		continue;
-		ErrCLEANUP
-		fprintf( stderr, "Error: -%c %s FAILED (ERRNO=%d) %s\n", curr->cmd, curr->arglist, errno, strerror(errno) );
-		//optDestroy(curr);
-		ErrCLEAN
+		
+		free(curr);		//Destroys the dequeued OPT NODE
 		}
 		
 	ErrNEG1(  closeConnection(socketname)  );
 	
-	optQueueDestroy();
+	ErrNEG1(  optQueueDestroy()  );
+	
 	return 0;
 
 ErrCLEANUP
+	if(optQueue) optQueueDestroy();
 	return -1;
 ErrCLEAN
 	}

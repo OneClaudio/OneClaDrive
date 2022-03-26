@@ -17,8 +17,8 @@
 #include "./api.h"
 #include "./utils.h"		//READ(), WRITE(), FREAD(), FWRITE()
 
-int sid=-1;		//Server ID
-char* ssocket=NULL;
+int sid=NOTSET;		//Server ID
+char* connsocket=NULL;
 
 bool print=false;
 
@@ -39,7 +39,7 @@ bool print=false;
 	}
 
 #define CHKCONN( sid ){																	\
-	if( sid==-1){																		\
+	if( (sid) == NOTSET){																	\
 		fprintf(stderr, "Warning: client not connected, use openConnection() first\n");	\
 		errno=ENOTCONN;																	\
 		return -1;																		\
@@ -94,6 +94,11 @@ static void errReply( Reply r, const char* pathname){
 			errno=EALREADY;
 			break;
 		
+		case(EMPTY):
+			fprintf(stderr, "Logic: Trying to READ an EMPTY file '%s', you must first WRITE on it\n", pathname);
+			errno=ENOENT;
+			break;
+			
 		case(NOTEMPTY):
 			fprintf(stderr, "Logic: Trying to WRITE on file '%s' which was already initialized, use APPEND functionality\n", pathname);
 			errno=ENOTEMPTY;
@@ -202,8 +207,10 @@ static int CACHEretrieve( const char* trashdir){
 		READ( sid, &reply, sizeof(Reply));
 		
 		if(reply==OK) break;			//EXIT COND: this means that all excess files have been EJECTED from the FSS
-		else if( reply==CACHE)			//OTHERWISE: keep receiving the files from the FSS
+		else if( reply==CACHE){			//OTHERWISE: keep receiving the files from the FSS
 			ErrNEG1(  RECVfile(trashdir)  );
+			}
+		else errReply(reply, "unknown");
 		}
 SUCCESS
 	return 0;
@@ -373,6 +380,7 @@ int readNFiles( int n, const char* readdir){
 			ErrNEG1(  RECVfile(readdir)  );
 			read++;
 			}
+		else errReply(reply, "unknown");
 		}
 SUCCESS
     return read;
@@ -428,7 +436,7 @@ int openConnection(const char* sockname, int msec, const struct timespec abstime
 		return -1;
 		}
 	
-	if( sid != -1 ){
+	if( sid != NOTSET ){
 		errno=EISCONN;
 		return -1;
 		}
@@ -440,32 +448,37 @@ int openConnection(const char* sockname, int msec, const struct timespec abstime
 	saddr.sun_family=AF_UNIX;							//specify the domain (AF_UNIX) and the path (sockname) of the SOCKET
 	strncpy(saddr.sun_path, sockname, strlen(sockname));
 	
-	
-	struct timespec sleeptime;		//INTERVAL time between the connection attempts
-	sleeptime.tv_sec=  msec/1000;
-	sleeptime.tv_nsec=(msec%1000)*1000000;
-	
-	struct timespec currtime;		//at each conn attempt CURRTIME is checked against ABSTIME
+	connsocket=strdup(sockname);
 	
 	bool connected=false;
 	
-	do{
-		if( connect( sid, (struct sockaddr *)&saddr, SUN_LEN(&saddr) ) == 0){		//immediate FIRST TRY
-			connected=true;
-			break;
-			}
-		
-		else nanosleep( &sleeptime, NULL);				//HOLD for msec ms
-		clock_gettime(CLOCK_REALTIME, &currtime);		//gets the CURRENT TIME
+	if( msec==0 || ( abstime.tv_sec==0 && abstime.tv_nsec==0 )){	//if one of the TIMERS is ZERO: IGNORE TIMES and use SINGLE TRY
+		ErrNEG1(  connect( sid, (struct sockaddr *)&saddr, SUN_LEN(&saddr))  );
+		connected=true;
+		}
+	else{			//if BOTH TIMERS are SET: RETRY every MSEC ms, until ABSTIME has passed
+		struct timespec sleeptime;		//INTERVAL time between the connection attempts
+		sleeptime.tv_sec=  msec/1000;
+		sleeptime.tv_nsec=(msec%1000)*1000000;
 	
-	} while( diffTimespec( &abstime, &currtime)>0 );	//if ABSTIME hasnt been reached LOOP again
+		struct timespec currtime;		//at each conn attempt CURRTIME is checked against ABSTIME
+	
+		do{
+			if( connect( sid, (struct sockaddr *)&saddr, SUN_LEN(&saddr) ) == 0){		//immediate FIRST TRY
+				connected=true;
+				break;
+				}
+		
+			else nanosleep( &sleeptime, NULL);				//HOLD for msec ms
+			clock_gettime(CLOCK_REALTIME, &currtime);		//gets the CURRENT TIME
+	
+			}while( diffTimespec( &abstime, &currtime)>0 );	//if ABSTIME hasnt been reached LOOP again
+		}
 
 	if(connected) return 0;
 	else return -1;
 	
-ErrCLEANUP
-	return -1;
-ErrCLEAN
+	ErrCLEANUP return -1; ErrCLEAN
 	}
 
 int closeConnection(const char* sockname){
@@ -477,7 +490,7 @@ int closeConnection(const char* sockname){
 		return -1;
 		}
 	
-	if( strcmp( sockname, ssocket ) !=0 ){
+	if( strcmp( sockname, connsocket ) !=0 ){
 		fprintf(stderr, "Error: trying to close a different socket\n");
 		errno=EBADF;
 		return -1;
@@ -488,10 +501,12 @@ int closeConnection(const char* sockname){
 	WRITE( sid, &cmd, sizeof(Cmd));
 	
 	ErrNEG1( close(sid)  );
-	sid=-1;
+	sid=NOTSET;
+	free(connsocket);
 	return 0;
 											
 ErrCLEANUP
+	if(connsocket) free(connsocket);
 	return -1;
 ErrCLEAN
 	}
@@ -515,7 +530,7 @@ int ezOpen(const char* sockname){
 	saddr.sun_family=AF_UNIX;							//specify the domain (AF_UNIX) and the path (sockname) of the SOCKET
 	strncpy(saddr.sun_path, sockname, strlen(sockname));
 	
-	ssocket=strdup(sockname);
+	connsocket=strdup(sockname);
 	
 	ErrNEG1( connect( sid, (struct sockaddr *)&saddr, SUN_LEN(&saddr))  );
 	return 0;

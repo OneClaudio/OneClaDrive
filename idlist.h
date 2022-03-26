@@ -1,6 +1,9 @@
+
+#define EMPTYLIST 1
+
 typedef struct IdNode{			//LIST NODE	contains:
     int id;							//FILE DESCRIPTOR
-    struct IdNode* prev;				// ptr to PREVIOUS node
+    struct IdNode* prev;			// ptr to PREVIOUS node
 	} IdNode;
 
 typedef struct IdList{			//THREAD SAFE LIST type
@@ -11,12 +14,12 @@ typedef struct IdList{			//THREAD SAFE LIST type
 	
 IdList* idListCreate();
 
+int idListDestroy(IdList* list);
+
 int enqId(IdList* list, int id);
 
 int deqId(IdList* list, int* id);
 
-int findId(IdList* list, int id);
+bool findId(IdList* list, int id);
 
-int findRmvId(IdList* list, int id);
-
-int idListDestroy(IdList* list);
+bool findRmvId(IdList* list, int id);

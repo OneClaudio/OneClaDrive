@@ -4,6 +4,8 @@
 //others
 #include <limits.h>
 
+#define NOTSET -1
+
 static inline int isNumber( char* str){
 	char* e=NULL;
 	errno=0;
@@ -106,12 +108,12 @@ static inline ssize_t fwritefull(void* buf, size_t size, size_t nblocks, FILE* f
 	}
 
 #define FWRITE( addr, size, n, id) ErrNEG1(     fwrite( addr, size, n, id) );
-	/*	non-strict version:        ErrNEG1( fwritefull( addr, size, n, id) );	*/
+	/*	strict version:		           ErrNEG1( fwritefull( addr, size, n, id) );	*/
 		
 
 
 
 #define FREAD( addr, size, n, id) ErrNEG1(     fread( addr, size, n, id)  );
-	/*	non-strict version:       ErrNEG1( freadfull( addr, size, n, id)  );	*/
+	/*	strict version:		          ErrNEG1( freadfull( addr, size, n, id)  );	*/
 
 #endif
