@@ -20,11 +20,6 @@
 #include "./filestorage.h"
 #include "./errcheck.h"
 
-
-	
-	
-	
-
 FILE* Log=NULL;
 pthread_mutex_t LogMutex;
 
@@ -115,380 +110,277 @@ Storage* storage;
 /*---------------------------------------------------WORKER----------------------------------------------------------*/	
 /*-------------------------------------------------------------------------------------------------------------------*/
 
-void* work(void* unused){			//ROUTINE of WORKER THREADS
+// called by OPEN/WRITE/APPEND becaus they may trigger a CAP LIMIT, old file/s must be sent back to the CLIENT 
+int cacheAlg( int cid, Cmd cmd, size_t size){
+	while( storage->numfiles == MAXNUMFILES  ||  (storage->capacity+size) > MAXCAPACITY ){
+		REPLY(CACHE);
+		
+		File* victim=NULL;
+		ErrNULL( victim=rmvLastFile() );
+		
+		WRITE(cid, &victim->size, sizeof(size_t));
+		WRITE(cid, victim->cont, victim->size );
+		WRITE(cid, victim->name, PATH_MAX);
+		
+		storage->capacity-=size;
+		storage->numfiles--;
+		
+		LOGOP(CACHE,victim->name, &victim->size);
+		fileDestroy( victim );
+		}
+//  REPLY(OK)	//the caller must respond OK to the client, which means that the replacement is complete
+				//	(each one has a slightly diff routine before replying)
+	SUCCESS    return  0;
+	ErrCLEANUP return -1; ErrCLEAN
+	}
+
+void* work(void* unused){				//ROUTINE of WORKER THREADS
 	
 	while(1){
-		bool disconnecting=false;
+		bool Disconnecting=false;		//needed outside of the switch QUIT case, has to pass information that the CID is closing connection
 		
-		int cid=NOTSET;					//tries to get CID from QUEUE
+		int cid=NOTSET;					//gets a ready ClientID (CID) from PENDING QUEUE
 		while( (deqId(pending, &cid))==EMPTYLIST){	//if empty BUSY WAIT with timer
 			usleep(50000);
 			}
-		if(cid==NOTSET) ErrSHHH;		//that means that a FATAL LOCK ERR has happened inside deqId()
-		if(cid==TERMINATE) break;
+		if(cid==NOTSET) ErrSHHH;		//ERR: CID UNCHANGED means that a FATAL ERR has happened inside deqId()
+		if(cid==TERMINATE) break;		//TERMINATE SIGNAL sent from the MAIN THREAD when it's time to close shop
 													
-		Cmd cmd={0};						//gets CMD request from CIDs channel
+		Cmd cmd={0};					//gets CMD request from CID channel
 		READ(cid, &cmd, sizeof(Cmd));
 		
+		WRLOCK(&storage->lock);
 		
-		ErrNZERO(  pthread_rwlock_wrlock(&storage->lock)  );	//TODO move inside with rd/wr differentiation
+		File* f=NULL;					//each OP (except READN) operates on a SPECIFIC FILE, this holds a REFERENCE to it ( getFile() )
+		if(cmd.code!=READN){
+		//  if(cmd.filename == NULL)	//Already checked in API call, could double check but not needed if all clients are forced to use the API		
+			f=getFile(cmd.filename);
+			}
 		
 		switch(cmd.code){
 			
-			case (OPEN):{
-				ErrLOCAL
-			/*	if(cmd.filename == NULL)	//Already checked in API call, could double check in each case but its an hassle  */
-						
-				File* f=getFile(cmd.filename);
-				
+			case OPEN: {
 				if( cmd.info & O_CREATE ){	//Client requested an O_CREATE openFile()
 					if( f!=NULL){   REPLY(EXISTS); LOGOP(EXISTS,cmd.filename,NULL); break;	} //ERR: file already existing
 					ErrNULL(  f=fileCreate(cmd.filename)  );	//ERR:	fatal malloc error while allocating space for new file (ENOMEM)
 					ErrNEG1(  addNewFile(f)  );					//Successful CREATION	
-					}						//Client requested a normal openFile()	
-				else{
+					}	
+				else{						//Client requested a normal openFile()
 					if( f==NULL){   REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break;	} //ERR: file not already existing/not found
 					if( findId(f->openIds, cid) ){   REPLY(ALROPEN); LOGOP(ALROPEN,cmd.filename,NULL); break; } //ERR: cid already opened this file
 					}
 				
 				ErrNEG1(  enqId(f->openIds, cid)  );			//Successful OPEN
 				
-				if( cmd.info & O_LOCK ){
+				if( cmd.info & O_LOCK ){ 	//Client requested a O_LOCK openFile()
+											// mind that the the OPEN with LOCK doesnt HANG like its counterpart and returns IMMEDIATELY if unsuccessful
 					if( f->lockId!=NOTSET && f->lockId!=cid ){   REPLY(LOCKED); LOGOP(LOCKED,cmd.filename,NULL); break; }
-					else f->lockId=cid;			//Successful LOCK
+					else f->lockId=cid;							//Successful LOCK
 					}
 					
 				REPLY(OK);   LOGOP(OK,cmd.filename,NULL);
 				
-				if( storage->numfiles == MAXNUMFILES ){
-					REPLY(CACHE); 
-					
-					File* victim=NULL;
-					ErrNULL( victim=rmvLastFile() );
-					
-					WRITE(cid, &victim->size, sizeof(size_t));
-					WRITE(cid, victim->cont, victim->size );
-					WRITE(cid, victim->name, PATH_MAX);
-					
-					LOGOP(CACHE,victim->name, &victim->size);
-					fileDestroy( victim );					
-					}
-					
+				ErrNEG1(  cacheAlg(cid, cmd, (size_t)0)  );		//CACHE ALG enclosed in function bc is reused with the same code elsewhere
+				
 				REPLY(OK);
-				break;
-
-			ErrCLEANUP
-				exit(EXIT_FAILURE);
-			ErrCLEAN
+				
 				} break;
+			
+			case WRITE:				// All these OPERATIONS need a similar set of REQUIREMENTS
+			case APPEND:			//		mainly because they all need to be LOCKED by the CLIENT to be successful
+			case REMOVE:			//      (and this implies that the FILE EXISTS in FSS and is OPEN by CID)
+			case UNLOCK: {
+			
+				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }		//ERR: getFile() didnt FOUND it
+				
+				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; } //ERR: CID hasnt OPENED it
+				
+				if( f->lockId != cid ){	REPLY(NOTLOCKED); LOGOP(NOTLOCKED,cmd.filename,NULL); break; }	//ERR: CID doesnt currently HOLD the FILE LOCK
+				
+				switch(cmd.code){
+				
+					case WRITE:{									//ERR: WRITE can only be performed on a NEWLY CREATED (EMPTY) FILE
+						if( f->cont != NULL ){ REPLY(NOTEMPTY); LOGOP(EMPTY,cmd.filename,NULL); break; } 
+						REPLY(OK);
+						size_t size=0;
+						READ(cid, &size, sizeof(size_t));
+						printf("size: %ld\n", size);
+				
+						void* cont=NULL;
+						ErrNULL( cont=calloc(1, size) );
+						READ(cid, cont, size);
+																	//ERR: if the incoming FILE cant FIT the WHOLE SPACE, it cannot be accepted in
+						if( size > MAXCAPACITY ){ REPLY(TOOBIG); LOGOP(TOOBIG,cmd.filename,NULL); break; }
+						
+						ErrNEG1( cacheAlg(cid,cmd,size)  );
+						
+						f->size=size;				//Actual WRITE, storing in the FILE NODE the received CONTs
+						f->cont=cont;
+						storage->numfiles++;		//Updating STORAGE DIMENSIONS
+						storage->capacity+=size;
+				
+						REPLY(OK);
+						size_t* s=&size;			
+						LOGOP(OK, cmd.filename, s);	//WARN: this threw 'always true' warning without this extra step
+													//		(probably bc ADDR of LOCAL VAR cant be NULL)
+						} break;
+						
+					case APPEND: {
+						REPLY(OK);					//APPEND can be performed on ALL files, empty or not
+				
+						size_t size=0; 
+						READ(cid, &size, sizeof(size_t));
+				
+						void* buf=NULL;
+						ErrNULL( buf=calloc(1, size) );
+						READ(cid, buf, size);
+																	//ERR: if the RESULTING FILE cant FIT the WHOLE SPACE the append must be canceled
+						if( (f->size + size) > MAXCAPACITY ){ REPLY(TOOBIG); LOGOP(TOOBIG,cmd.filename,NULL); break; }
+				
+						ErrNEG1(  cacheAlg(cid,cmd,size)  );
 					
+						void* extendedcont=NULL;
+						ErrNULL(  extendedcont=realloc( f->cont, f->size+size)  );	//REALLOCATING OG FILE to fit the new CONTs
+						f->cont=extendedcont;
+						memcpy( f->cont + f->size, buf, size );		//APPENDING new CONTENT starting from the end of the OG FILE
+						f->size+=size;				//Updating FILE SIZE to reflect the operation
+				
+						storage->capacity+=size;	//Incrementing STORAGE SIZE
+				
+						free(buf);					//the BUFFER has been COPIED, dont need it anymore
+				
+						REPLY(OK);
+						size_t* s=&size;
+						LOGOP(OK, cmd.filename, s);	//WARN: this threw 'always true' warning without this extra step (bc ADDR of LOCAL VAR cant be NULL)
+						} break;
+						
+					case REMOVE:				
+						ErrNEG1(  rmvThisFile(f)  );		//Already have all requirements, proceding with REMOVE
+						LOGOP(OK, cmd.filename, &f->size);	
+						ErrNEG1(  fileDestroy(f)  );		//DEALLOCATES the REMOVED FILE
+						REPLY(OK);
+						break;
+						
+					case UNLOCK:
+						f->lockId=NOTSET;					//Already have all requirements, proceding with UNLOCK
+						LOGOP(OK,cmd.filename,NULL);
+						REPLY(OK);
+						break;
+					
+					default: ;
+					}
+				} break;
 			
+			case READ:			//These 2 OPERATIONS instead require to NOT BEING LOCKED by OTHER CLIENTs
+			case LOCK: {		//      (and this also implies that the FILE already EXISTS and that its OPEN by CID)
 			
-			
+				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
+		
+				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
+		
+				if( f->lockId!=NOTSET && f->lockId!=cid ){ REPLY(LOCKED); LOGOP(LOCKED,cmd.filename,NULL); break; } //ERR: FILE LOCKED by OTHER CID
+				
+				switch(cmd.code){
+				
+					case LOCK:										//ERR: No sense in GETTING the LOCK AGAIN if the CLIENT already owns it
+						if( f->lockId==cid ){ REPLY(ALRLOCKED); LOGOP(ALRLOCKED,cmd.filename,NULL); break; }
+
+						f->lockId=cid;							//Proceeding with the LOCKING
+		
+						LOGOP(OK,cmd.filename,NULL);
+						REPLY(OK);
+						break;
+					
+					case READ:
+						if( f->cont==NULL ){ REPLY(EMPTY); LOGOP(EMPTY,cmd.filename,NULL); break; }		//ERR: no sense in READING an EMPTY file
+				
+						REPLY(OK);
+				
+						WRITE(cid, &f->size, sizeof(size_t));	//Sending the requested DATA back
+						WRITE(cid, f->cont, f->size);
+				
+						LOGOP(OK,cmd.filename,&f->size);
+						break;
+					
+					default: ;
+					}
+				} break;
+						
 			case (CLOSE):{
-				printf("CLOSE file '%s'\n", cmd.filename);
-				File* f=getFile(cmd.filename);
+			
 				if( f==NULL){   REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }		//ERR: file not found
 				
 				if( f->lockId==cid) f->lockId=NOTSET;		//Eventual UNLOCK before closing
 				
-				if( ! findRmvId(f->openIds, cid)  ){  REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); }
-				else{ REPLY(OK); LOGOP(OK,cmd.filename,NULL); }
-				
-				} break;
+				if( findRmvId(f->openIds, cid)  ){  REPLY(OK);  LOGOP(OK,cmd.filename,NULL); }
+				else {  REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); }
+															//ERR: if the FILE wasnt already OPEN by CID, there was no sense in CLOSING it
+				} break;		
 
-			
-			
-			
-			case (WRITE):{
-ErrLOCAL		
-				printf("starting WRITE file '%s'\n", cmd.filename);	
-				File* f=getFile(cmd.filename);
-				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
-				
-				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
-				
-				if( f->lockId != cid ){	REPLY(NOTLOCKED); LOGOP(NOTLOCKED,cmd.filename,NULL); break; }
-				
-				if( f->cont != NULL ){ REPLY(NOTEMPTY); LOGOP(EMPTY,cmd.filename,NULL); break; }
-				
-				REPLY(OK);
-				
-				printf("receiving files cont\n");
-				size_t size=0;
-				READ(cid, &size, sizeof(size_t));
-				printf("size: %ld\n", size);
-				
-				void* cont=NULL;
-				ErrNULL( cont=calloc(1, size) );
-				READ(cid, cont, size);
-				
-				if( size > MAXCAPACITY ){ REPLY(TOOBIG); LOGOP(TOOBIG,cmd.filename,NULL); break; }
-				
-				while( storage->numfiles == MAXNUMFILES  ||  (storage->capacity+size) > MAXCAPACITY ){
-					REPLY(CACHE);
-					
-					File* victim=NULL;
-					ErrNULL( victim=rmvLastFile() );
-					
-					WRITE(cid, &victim->size, sizeof(size_t));
-					WRITE(cid, victim->cont, victim->size );
-					WRITE(cid, victim->name, PATH_MAX);
-					
-					LOGOP(CACHE,victim->name, &victim->size);
-					fileDestroy( victim );
-					}
-				
-				f->size=size;
-				f->cont=cont;
-				storage->numfiles++;
-				storage->capacity+=size;
-				
-				REPLY(OK);
-				size_t* s=&size;				//my MACRO monstrosity doesnt like LOCAL size_t variables
-				LOGOP(OK, cmd.filename, s);
-				break;
-ErrCLEANUP
-				exit(EXIT_FAILURE);
-ErrCLEAN
-				} break;				
-
-			case (APPEND):{
-ErrLOCAL
-				printf("starting APPEND to file '%s'\n", cmd.filename);	
-				File* f=getFile(cmd.filename);
-				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
-				
-				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
-				
-				if( f->lockId != cid ){	REPLY(NOTLOCKED); LOGOP(NOTLOCKED,cmd.filename,NULL); break; }
-				
-				REPLY(OK);
-				
-				size_t size=0; 
-				READ(cid, &size, sizeof(size_t));
-				
-				void* buf=NULL;
-				ErrNULL( buf=calloc(1, size) );
-				READ(cid, buf, size);
-				
-				if( size > MAXCAPACITY ){ REPLY(TOOBIG); LOGOP(TOOBIG,cmd.filename,NULL); break; }
-				
-				while( storage->numfiles == MAXNUMFILES  ||  (storage->capacity+size) > MAXCAPACITY ){
-					REPLY(CACHE);
-					
-					File* victim=NULL;
-					ErrNULL( victim=rmvLastFile() );
-					
-					WRITE(cid, &victim->size, sizeof(size_t));
-					WRITE(cid, victim->cont, victim->size );
-					WRITE(cid, victim->name, PATH_MAX);
-					
-					LOGOP(CACHE,victim->name, &victim->size);
-					fileDestroy( victim );
-					}
-					
-				void* extendedcont=NULL;
-				ErrNULL(  extendedcont=realloc( f->cont, f->size+size)  );
-				f->cont=extendedcont;
-				memcpy( f->cont+f->size, buf, size );
-				f->size+=size;
-				
-				storage->capacity+=size;
-				
-				free(buf);
-				
-				REPLY(OK);
-				size_t* s=&size;
-				LOGOP(OK, cmd.filename, s);
-				break;
-ErrCLEANUP
-				exit(EXIT_FAILURE);
-ErrCLEAN
-				} break;			
-
-
-
-
-			case (READ):{
-ErrLOCAL
-				printf("starting READ file '%s'\n", cmd.filename);	
-				File* f=getFile(cmd.filename);
-				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
-				
-				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
-				
-				if( f->lockId!=NOTSET && f->lockId!=cid ){ REPLY(LOCKED); LOGOP(LOCKED,cmd.filename,NULL); break; }
-				
-				if( f->cont==NULL ){ REPLY(EMPTY); LOGOP(EMPTY,cmd.filename,NULL); break; }		//cant READ EMPTY files
-				
-				REPLY(OK);
-				
-				WRITE(cid, &f->size, sizeof(size_t));
-				WRITE(cid, f->cont, f->size);
-				
-				LOGOP(OK,cmd.filename,&f->size);
-
-				break;
-ErrCLEANUP
-				exit(EXIT_FAILURE);
-ErrCLEAN
-				} break;
-			
-			
-			
-			
 			case (READN):{
-ErrLOCAL
-				printf("starting READN\n");	
-				REPLY(OK);
+				REPLY(OK);		//READN basically CANT FAIL by design (worst case scenario other than FATAL SC ERROR is that it reads 0 files)
 				
 				File* curr=storage->last;
 				
 				int n=( cmd.info<=0  ?  storage->numfiles  :  cmd.info );
 				int n_read=0;
 				
-				while( n_read < n ){
-					if( curr==NULL) break;
+				for(int i=0; i<n; i++){		//for each of N RANDOM FILES
+					if( curr==NULL) break;										//If FSS is completely EMPTY get out
 					
-					if( curr->lockId!=NOTSET && curr->lockId!=cid ) continue;	//cant READ LOCKED files
+					if( curr->lockId!=NOTSET && curr->lockId!=cid ) continue;	//READN cannot read LOCKED files
 					
-					if( curr->cont==NULL ) continue;							//cant READ EMPTY files
+					if( curr->cont==NULL ) continue;							//Also no sense in reading EMPTY files
 					
-					REPLY(ANOTHER);
+					REPLY(ANOTHER);								//Tells the CLIENT that there's ANOTHER FILE to be READ
 					WRITE(cid, &curr->size, sizeof(size_t));
 					WRITE(cid, curr->cont, curr->size);
-					WRITE(cid, curr->name, PATH_MAX);
+					WRITE(cid, curr->name, PATH_MAX);			//Must also send his NAME other than SIZE and CONT
 					
-					LOGOP(ANOTHER, curr->name , &curr->size);				
-					n_read++;
-					curr=curr->prev;
+					LOGOP(ANOTHER, curr->name , &curr->size);		
+					n_read++;									//increments READ COUNT
+					curr=curr->prev;							//CONTINUES TRAVERSING the LIST
 					}
 				
 				REPLY(OK);
 				LOGOP(OK, NULL, NULL);
 				break;
-ErrCLEANUP
-				exit(EXIT_FAILURE);
-ErrCLEAN
 				} break;			
-		
-		
-		
-		
-			case (REMOVE):{
-ErrLOCAL
-				printf("starting REMOVE file '%s'\n", cmd.filename);	
-				File* f=getFile(cmd.filename);
-				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
-					
-				if( ! findId(f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
 				
-				if( f->lockId != cid ){	REPLY(NOTLOCKED); LOGOP(NOTLOCKED,cmd.filename,NULL); break; }
-				
-				LOGOP(OK, cmd.filename, &f->size);
-				
-				ErrNEG1(  rmvThisFile(f)  );
-				
-				fileDestroy(f);
-				
-				REPLY(OK);
-				
-				break;
-ErrCLEANUP
-				exit(EXIT_FAILURE);
-ErrCLEAN
-				}
-				break;
-				
-				
-				
-				
-			case (LOCK):{
-ErrLOCAL
-				printf("LOCK file '%s'\n", cmd.filename);
-				
-				File* f=getFile(cmd.filename);
-				
-				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
-				
-				if( ! findId( f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
-				
-				if( f->lockId!=NOTSET && f->lockId!=cid ){ REPLY(LOCKED); LOGOP(LOCKED,cmd.filename,NULL); break; }
-				
-				if( f->lockId==cid ){ REPLY(ALRLOCKED); LOGOP(ALRLOCKED,cmd.filename,NULL); break; }
-				
-				
-				f->lockId=cid;
-				
-				REPLY(OK);
-				LOGOP(OK,cmd.filename,NULL);
-
-				break;
-ErrCLEANUP
-				exit(EXIT_FAILURE);
-ErrCLEAN
-				}
-				break;
-				
-				
-				
-			
-			case (UNLOCK):{
-ErrLOCAL
-				printf("starting UNLOCK file '%s'\n", cmd.filename);	
-				File* f=getFile(cmd.filename);
-				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }
-				
-				if( ! findId( f->openIds, cid) ){ REPLY(NOTOPEN); LOGOP(NOTOPEN,cmd.filename,NULL); break; }
-				
-				if( f->lockId != cid ){ REPLY(NOTLOCKED); LOGOP(NOTLOCKED,cmd.filename,NULL); break; }
-				
-				f->lockId=NOTSET;
-				
-				REPLY(OK);
-				LOGOP(OK,cmd.filename,NULL);
-
-				break;
-ErrCLEANUP
-				exit(EXIT_FAILURE);
-ErrCLEAN
-				}
-				break;
-			
+	
 			case (IDLE):
 			case (QUIT):{
-				printf("quitting CONN\n");	
 				File* curr=storage->last;
 			
-				for( int i=0; i < storage->numfiles; i++){	//close all files open by cid, unlock all files locked by cid	
-					if( curr==NULL) break;	//safety check for empty list		
+				for( int i=0; i < storage->numfiles; i++){	//FOR EACH FILE in the FSS:
+					if( curr==NULL) break;							//safety check for END of the LIST		
 					
-					findRmvId(curr->openIds, cid);
-					if( curr->lockId==cid ) curr->lockId=NOTSET;
+					findRmvId(curr->openIds, cid);					//UNLOCKS all files locked by CID	
+					if( curr->lockId==cid ) curr->lockId=NOTSET;	//CLOSES all files open by cid 
 										
-					curr=curr->prev;					
+					curr=curr->prev;								//Traverse the FSS					
 					}
-				disconnecting=true;			
-				}
-				break;
+				Disconnecting=true;		//Sets VAR so that the CID isnt passed back to the MAIN THREAD
+				} break;
 			
 			default:
 				fprintf(stderr, "Come sei finito qui? cmd code: %d\n", cmd.code);
 				break;		
 			}
-		ErrNZERO(  pthread_rwlock_unlock(&storage->lock)  );
+
+		RWUNLOCK(&storage->lock);
 		
-		if(disconnecting){
-			LOG("WORK: CLIENT %d DISCONNECTED\n", cid);   /*	Client CID successfully unconnected */
-			cid=DISCONN;
-			}
-		WRITE( done, &cid, sizeof(int) );		// original CID or DISCONNECTION CODE (decrements the number of active clients in main)
+		if(Disconnecting){
+			LOG("WORK: CLIENT %d DISCONNECTED\n", cid);
+			cid=DISCONN;						//A CODE is SENT back to the MAIN THREAD instead of the DISCONNECTED CLIENT ID
+			}									//		(decrements the number of active clients in main)
+
+		WRITE( done, &cid, sizeof(int) );		//if it isnt DISCONNECTING the CLIENT ID is SENT BACK to the MAIN THREAD
 		
-		printf("STORAGE:  ----------------------------\n");
+		printf("STORAGE:  ----------------------------\n");		//DBG: Prints the list of FILES currently in the FSS
 		storagePrint();
 		printf("--------------------------------------\n\n");
-		fflush(stdin);
+		fflush(stdout);
 		}
 
 	SUCCESS    return NULL;
