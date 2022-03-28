@@ -1,0 +1,76 @@
+WARN: CONFIG FILE MISSING -> DEFAULT PARAMETERS LOADED
+MAIN: SOCKET OPENED
+MAIN: CREATED WORKER THREAD #0
+MAIN: CREATED WORKER THREAD #1
+MAIN: CREATED WORKER THREAD #2
+MAIN: CREATED WORKER THREAD #3
+MAIN: SERVER READY
+MAIN: ACCEPTED NEW CLIENT 6
+WORK: CID=6   OPEN   OK               	./FILES/batzorig.mp4
+WORK: CID=6   WRITE  OK              12680145 B	./FILES/batzorig.mp4
+WORK: CID=6   CLOSE  OK               	./FILES/batzorig.mp4
+WORK: CID=6   OPEN   OK               	./FILES/camping.jpg
+WORK: CID=6   WRITE  OK              147232 B	./FILES/camping.jpg
+WORK: CID=6   CLOSE  OK               	./FILES/camping.jpg
+WORK: CID=6   OPEN   EXISTS           	./FILES/camping.jpg
+WORK: CID=6   OPEN   OK               	./FILES/clearly.png
+WORK: CID=6   WRITE  OK              1335996 B	./FILES/clearly.png
+WORK: CID=6   CLOSE  OK               	./FILES/clearly.png
+WORK: CID=6   OPEN   OK               	./FILES/pirate.mp4
+WORK: CID=6   WRITE  OK              16056171 B	./FILES/pirate.mp4
+WORK: CID=6   CLOSE  OK               	./FILES/pirate.mp4
+WORK: CID=6   OPEN   OK               	./FILES/gojiras.jpg
+WORK: CID=6   WRITE  OK              264811 B	./FILES/gojiras.jpg
+WORK: CID=6   CLOSE  OK               	./FILES/gojiras.jpg
+WORK: CID=6   OPEN   OK               	./FILES/sp00k.mp4
+WORK: CID=6   WRITE  OK              67755 B	./FILES/sp00k.mp4
+WORK: CID=6   CLOSE  OK               	./FILES/sp00k.mp4
+WORK: CID=6   OPEN   OK               	./FILES/tuxmealux.svg
+WORK: CID=6   WRITE  OK              49983 B	./FILES/tuxmealux.svg
+WORK: CID=6   CLOSE  OK               	./FILES/tuxmealux.svg
+WORK: CID=6   OPEN   OK               	./FILES/ok-doomer.mp4
+WORK: CID=6   WRITE  OK              28032 B	./FILES/ok-doomer.mp4
+WORK: CID=6   CLOSE  OK               	./FILES/ok-doomer.mp4
+WORK: CID=6   OPEN   OK               	./FILES/batzorig.mp4
+WORK: CID=6   LOCK   OK               	./FILES/batzorig.mp4
+WORK: CID=6   REMOVE OK              12680145 B	./FILES/batzorig.mp4
+WORK: CID=6   READN  ANOTHER         147232 B	./FILES/camping.jpg
+WORK: CID=6   READN  ANOTHER         1335996 B	./FILES/clearly.png
+WORK: CID=6   READN  ANOTHER         16056171 B	./FILES/pirate.mp4
+WORK: CID=6   READN  OK               	
+WORK: CLIENT 6 DISCONNECTED
+MAIN: ACCEPTED NEW CLIENT 7
+WORK: CID=7   OPEN   OK               	./FILES/camping.jpg
+WORK: CID=7   LOCK   OK               	./FILES/camping.jpg
+WORK: CID=7   OPEN   ALROPEN          	./FILES/camping.jpg
+WORK: CLIENT 7 DISCONNECTED
+MAIN: ACCEPTED NEW CLIENT 8
+WORK: CLIENT 8 DISCONNECTED
+MAIN: ACCEPTED NEW CLIENT 9
+WORK: CID=9   OPEN   OK               	./FILES/batzorig.mp4
+WORK: CID=9   WRITE  OK              12680145 B	./FILES/batzorig.mp4
+WORK: CID=9   CLOSE  OK               	./FILES/batzorig.mp4
+WORK: CID=9   OPEN   EXISTS           	./FILES/camping.jpg
+WORK: CID=9   OPEN   EXISTS           	./FILES/camping.jpg
+WORK: CID=9   OPEN   EXISTS           	./FILES/clearly.png
+WORK: CID=9   OPEN   EXISTS           	./FILES/pirate.mp4
+WORK: CID=9   OPEN   EXISTS           	./FILES/gojiras.jpg
+WORK: CID=9   OPEN   EXISTS           	./FILES/sp00k.mp4
+WORK: CID=9   OPEN   EXISTS           	./FILES/tuxmealux.svg
+WORK: CID=9   OPEN   EXISTS           	./FILES/ok-doomer.mp4
+WORK: CID=9   OPEN   OK               	./FILES/batzorig.mp4
+WORK: CID=9   LOCK   OK               	./FILES/batzorig.mp4
+WORK: CID=9   REMOVE OK              12680145 B	./FILES/batzorig.mp4
+WORK: CID=9   READN  ANOTHER         147232 B	./FILES/camping.jpg
+WORK: CID=9   READN  ANOTHER         1335996 B	./FILES/clearly.png
+WORK: CID=9   READN  ANOTHER         16056171 B	./FILES/pirate.mp4
+WORK: CID=9   READN  OK               	
+WORK: CLIENT 9 DISCONNECTED
+MAIN: ACCEPTED NEW CLIENT 10
+WORK: CLIENT 10 DISCONNECTED
+MAIN: SOFT QUIT SIGNAL RECEIVED -> NO NEW CONNECTIONS ALLOWED
+MAIN: THREAD #0 JOINED
+MAIN: THREAD #1 JOINED
+MAIN: THREAD #2 JOINED
+MAIN: THREAD #3 JOINED
+MAIN: SERVER SUCCESSFULLY CLOSED
