@@ -8,19 +8,27 @@
 #include <dirent.h>
 #include <sys/stat.h>
 #include <stdbool.h>
+#include <signal.h>
 
 #include <api.h>
 #include <utils.h>		//READ(), WRITE(), FREAD(), FWRITE()
 #include <errcheck.h>
 #include <optqueue.h>
 
-#define SOCKETPATHN "./server_sol"
+#define SOCKETPATHN "./serversocket"
+
+volatile sig_atomic_t SigPipe=0;
+
+void handlepipe(int unused){
+	SigPipe=1;
+	fprintf(stderr, "ERR: UNEXPECTED SERVER CRASH\n");
+	}
 
 //Used for API calls inside the main command execution while loop
 //on ERROR: PRINTS API  BREAKS out of switch loop, PRINTS ERROR and SLEEPS (as much as required by -t OPTION) / on SUCCESS: SLEEPS anyway
-#define ErrAPI( call ){						\
+#define BrkErrAPI( call ){						\
 	if( (call)==-1 ){						\
-		fprintf( stderr, "Error: (-%c) %s FAILED (ERRNO=%d) %s\n", curr->cmd, file, errno, strerror(errno) );		\
+		fprintf( stderr, "C%d Error: (-%c) %s FAILED (ERRNO=%d) %s\n", CPID, curr->cmd, file, errno, strerror(errno) );		\
 		nanosleep(&sleeptime, NULL);		\
 		break;								\
 		}									\
@@ -28,9 +36,9 @@
 	}
 
 //like the previous one but CONTINUES (eg: inside while )
-#define ErrSDIR( call ){					\
+#define CntErrAPI( call ){					\
 	if( (call)==-1){						\
-		fprintf( stderr, "Error: %s on file %s FAILED (ERRNO=%d) %s\n", #call, ent->d_name, errno, strerror(errno) );		\
+		fprintf( stderr, "C%d Error: %s on file %s FAILED (ERRNO=%d) %s\n", CPID, #call, ent->d_name, errno, strerror(errno) );		\
 		nanosleep(&sleeptime, NULL);		\
 		continue;							\
 		}									\
@@ -40,6 +48,7 @@
 char* trashdir=NULL;
 int n_w=-1;
 struct timespec sleeptime;
+pid_t CPID=NOTSET;	//Client Process ID
 
 static inline double timespectot( struct timespec* t){
 	return t->tv_sec+(t->tv_nsec/1000000000.0);
@@ -76,9 +85,9 @@ int SENDdir(char* senddir){		//used in -w option
 				n_w--;			//with these increments here the behaviour is:	do N WRITE ATTEMPTS
 				n_sent++;		//if these are moved after the 3 API CALLS:		do N SUCCESSFUL WRITES
 				if(PRINT) printf("\n\tCREATE>WRITE>CLOSE of FILE %s\n", entpathname);
-				ErrSDIR(  openFile(  entpathname, O_CREATE | O_LOCK, trashdir)  );	if(PRINT) printf("\tOPEN: SUCCESS\n");
-				ErrSDIR(  writeFile( entpathname, trashdir)  );						if(PRINT) printf("\tWRITE: SUCCESS");
-				ErrSDIR(  closeFile( entpathname)  );								if(PRINT) printf("\tCLOSE: SUCCESS\n");
+				CntErrAPI(  openFile(  entpathname, O_CREATE | O_LOCK, trashdir)  );	if(PRINT) printf("\tOPEN: SUCCESS\n");
+				CntErrAPI(  writeFile( entpathname, trashdir)  );						if(PRINT) printf("\tWRITE: SUCCESS");
+				CntErrAPI(  closeFile( entpathname)  );								if(PRINT) printf("\tCLOSE: SUCCESS\n");
 				}
 			}
 		}
@@ -149,7 +158,7 @@ int main (int argc, char **argv){
 				
 				found_h=true;
 				printf(
-					"------------------------------------------------------------------------------------------------------------------"
+					"------------------------------------------------------------------------------------------------------------------\n"
 					"WARNING:           All options/actions are executed in the order in which are written (except -f -p -h)\n"
 					"OPTIONS:\n"
 					" -f socketname      Specifies the socket name used by the server [important] (default='./server_sol')\n"
@@ -167,7 +176,7 @@ int main (int argc, char **argv){
 					" -c f1[,f2,f3...]   Deletes the specified file list from the server\n"
 					"HELP:\n"
 					" -h                 Print this message once\n"
-					"------------------------------------------------------------------------------------------------------------------");
+					"------------------------------------------------------------------------------------------------------------------\n");
 				break;
 				
 			 case ':':		
@@ -186,9 +195,6 @@ int main (int argc, char **argv){
 	
 	
 	
-	
-	
-	
 	if(optind < argc){
 		fprintf(stderr,"Unknown options/arguments are present:\n");
 		while(optind < argc){
@@ -203,25 +209,28 @@ int main (int argc, char **argv){
 
 
 	char* readdir=NULL;
-/*	char* */trashdir=NULL;														//moved to global bc used inside -w auxiliary function ( SENDdir() )
+/*	char* */trashdir=NULL;				  //moved to global bc used inside -w auxiliary function ( SENDdir() )
 	
-/*	static struct timespec sleeptime;	*///INTERVAL time between two API calls	//moved to global bc used inside -w SENDdir()
-	sleeptime.tv_sec=0;
+/*	static struct timespec sleeptime;	*///INTERVAL time between two API calls
+	sleeptime.tv_sec=0;					  //moved to global bc used inside -w SENDdir()
 	sleeptime.tv_nsec=0;
 	
-	void* readbuf=NULL;
-	size_t readsize=0;
 	
-	
-	if(socketname==NULL) socketname=SOCKETPATHN;	//TODO choose if leaving this here or force -f option to specify the socketname
+	if(!found_f) socketname=SOCKETPATHN;	//If not present starts anyway with DEFAULT SOCKET macro
+	fprintf(stdout,"CONN: CONNECTION to SERVER (%s)\n", socketname); fflush(stdout);
 	ErrNEG1(  openConnection(socketname, 0, sleeptime)  );		//ignoring the timed connection for now
+	
+	struct sigaction s={0};		//HANDLING SIGPIPE
+	s.sa_handler=&handlepipe;	
+	ErrNEG1(  sigaction(SIGPIPE,  &s, NULL)  );
+	
+	CPID=getpid();
 	
 	
 	Opt* curr=NULL;
 	while(	(curr=deqOpt()) !=NULL){
 		if(PRINT) printf("------------------ -%c:\n", curr->cmd);
 		char* file=NULL; 		//used in the nested while loop when tokenizing each argument in single files
-		int r=-1;				//used as RETURN VALUE in most API CALLS: needed to store a RV for PRINT MODE
 		
 		char* argcpy=NULL;
 		if(curr->arglist!=NULL)
@@ -240,7 +249,7 @@ int main (int argc, char **argv){
 					sleeptime.tv_sec=  msec/1000;
 					sleeptime.tv_nsec=(msec%1000)*1000000;
 					
-					if(PRINT) printf("CMD: Updated TIME DELTA: %f\n", timespectot(&sleeptime) );
+					if(PRINT) printf("CMD: Updated TIME INTERVAL between API CALLS: %f\n", timespectot(&sleeptime) );
 					}
 				} break;	
 			
@@ -274,7 +283,7 @@ int main (int argc, char **argv){
 				if(PRINT) printf("REQ: BULK READ of %s FILES from FSS\n\n", n_R<0 ? "ALL" : argcpy );
 				
 				int n_read;
-				ErrAPI(  n_read=readNFiles( n_R, readdir)  ); // API CALL (eventual ERR PRINTING and immediate BREAK) (SLEEPS in both cases)
+				BrkErrAPI(  n_read=readNFiles( n_R, readdir)  ); // API CALL (eventual ERR PRINTING and immediate BREAK) (SLEEPS in both cases)
 				
 				if(PRINT){
 					if(n_read<0) printf("ERR: BULK READ NOT COMPLETED\n");
@@ -309,7 +318,7 @@ int main (int argc, char **argv){
 				if(PRINT) printf("REQ: FULL DIR WRITE of at most %s FILES from DIR %s\n", n_w<0 ? "ALL" : argcpy, senddir);
 				
 				int n_sent;
-				ErrAPI(  n_sent=SENDdir(senddir)  );
+				n_sent=SENDdir(senddir);
 				
 				if(PRINT){
 					if(n_sent<0) printf("ERR: DIR WRITE NOT COMPLETED\n");
@@ -332,7 +341,18 @@ int main (int argc, char **argv){
 					break;
 					}
 				
-				FILE* source=fopen(src, "r");		
+
+				struct stat srcstat;
+				ErrNEG1(  stat(src, &srcstat)  );			//ERR: filestat corrupted	(stat SETS ERRNO)
+				size_t size=srcstat.st_size;
+	
+				void* cont=NULL;
+				ErrNULL(  cont=calloc(1, size)  );				//ERR: malloc failure (malloc SETS ERRNO=ENOMEM)
+				
+				
+				
+				
+				FILE* source=fopen(src, "rb");		
 				if(source==NULL){								//ERR: file not found or other (fopen SETS ERRNO)
 					if(errno==ENOENT){
 						fprintf(stderr, "Error: file to append doesnt exist, skipping command\n");
@@ -340,29 +360,23 @@ int main (int argc, char **argv){
 						}
 					else ErrFAIL;
 					}
-
-				struct stat srcstat;
-				ErrNEG1(  stat(src, &srcstat)  );			//ERR: filestat corrupted	(stat SETS ERRNO)
-				size_t size=srcstat.st_size;
-	
-				void* cont=NULL;
-				ErrNULL(  cont=calloc(1, size)  );			//ERR: malloc failure (malloc SETS ERRNO=ENOMEM)
 				FREAD(cont, size, 1, source);					//ERR: file read failure (freadfull SETS ERRNO=EIO)
 				ErrNZERO(  fclose(source)  );					//ERR: fclose() returns EOF on error (SETS ERRNO)
 				
 				if(PRINT) printf("API: APPEND FILE %s to FILE %s", src, dest);
-				ErrAPI(  r=appendToFile( dest, cont, size, trashdir)  );
+				int r=-1;
+				r=appendToFile( dest, cont, size, trashdir);	// /!\ BrkErrAPI didnt enter CLEANUP CODE
 				if(PRINT){
 					if(r<0) printf("ERR: APPEND FAILED\n");
 					else    printf("RES: SUCCESS\t %zuB WRITTEN\n", size);
 					}
+				
 			SUCCESS
+				free(cont);
 				break;
 			ErrCLEANUP
-				if(source){
-					fflush(source);
-					fclose(source);
-					}
+				if(cont) free(cont);
+				if(source) fclose(source);
 				break;
 			ErrCLEAN		
 				}
@@ -371,42 +385,46 @@ int main (int argc, char **argv){
 			
 			default:{		// -w -r -l -u -c  all these have a comma separated list of arguments
 				char* file=NULL;
-				while( (file=strtok_r( argcpy, ",", &argcpy)) !=NULL ){		//FOR EACH FILE in its arglist:
+				while( (file=strtok_r( argcpy, ",", &argcpy)) !=NULL && !SigPipe ){		//FOR EACH FILE in its arglist:
 
 					switch(curr->cmd){										//call the API function relative to the current OPT
 						case 'W':
 							if(PRINT) printf("REQ: CREATE>WRITE>CLOSE of FILE %s\n", file);
 							
-							ErrAPI(  openFile(  file, O_CREATE | O_LOCK, trashdir)  );	if(PRINT) printf("\tOPEN: SUCCESS\n");
-							ErrAPI(  writeFile( file, trashdir)  );						if(PRINT) printf("\tWRITE: SUCCESS");
-							ErrAPI(  closeFile( file)  );								if(PRINT) printf("\tCLOSE: SUCCESS\n");
+							BrkErrAPI(  openFile(  file, O_CREATE | O_LOCK, trashdir)  );	if(PRINT) printf("\tOPEN: SUCCESS\n");
+							BrkErrAPI(  writeFile( file, trashdir)  );						if(PRINT){printf("\tWRITE: SUCCESS"); fflush(stdout); }
+							BrkErrAPI(  closeFile( file)  );								if(PRINT) printf("\tCLOSE: SUCCESS\n");
 							break;
 						
-						case 'r':
+						case 'r':{
 							if(PRINT) printf("REQ: OPEN>READ>CLOSE of FILE %s\n", file);
-							ErrAPI(  openFile( file, 0, trashdir)  );					if(PRINT) printf("\tOPEN: SUCCESS\n");
-							ErrAPI(  readFile( file, &readbuf, &readsize)  );			if(PRINT) printf("\tREAD: SUCCESS");
-
-							ErrNEG1(  SAVEfile( readbuf, readsize, file, readdir)  );	if(PRINT) printf("\t %zuB READ", readsize);
+							void* readbuf=NULL;
+							size_t readsize=0;
+							BrkErrAPI(  openFile( file, 0, trashdir)  );					if(PRINT) printf("\tOPEN: SUCCESS\n");
+							BrkErrAPI(  readFile( file, &readbuf, &readsize)  );			if(PRINT) printf("\tREAD: SUCCESS");
+																						if(PRINT){printf("\t %zuB READ", readsize); fflush(stdout); }
+							ErrNEG1(  SAVEfile( readbuf, readsize, file, readdir)  );
+							free(readbuf);
 							
-							ErrAPI(  closeFile( file)  );								if(PRINT) printf("\tCLOSE: SUCCESS\n");
+							BrkErrAPI(  closeFile( file)  );								if(PRINT) printf("\tCLOSE: SUCCESS\n");
+							}
 							break;
 						
 						case 'l':
 							if(PRINT) printf("REQ: OPEN>LOCK of FILE %s\n", file);
-							ErrAPI(  openFile( file, 0, trashdir)  );					if(PRINT) printf("\tOPEN: SUCCESS\n");
-							ErrAPI(  lockFile( file)  );								if(PRINT) printf("\tLOCK: SUCCESS\n");
+							BrkErrAPI(  openFile( file, 0, trashdir)  );					if(PRINT) printf("\tOPEN: SUCCESS\n");
+							BrkErrAPI(  lockFile( file)  );								if(PRINT) printf("\tLOCK: SUCCESS\n");
 							break;
 							
 						case 'u':
 							if(PRINT) printf("REQ: UNLOCK>CLOSE of FILE %s\n", file);
-							ErrAPI(  unlockFile( file)  );
-							ErrAPI(  closeFile( file)  );
+							BrkErrAPI(  unlockFile( file)  );
+							BrkErrAPI(  closeFile( file)  );
 							break;
 						
 						case 'c':
 							if(PRINT) printf("REQ: REMOVAL of FILE %s\n", file);
-							ErrAPI(  removeFile( file)  );								if(PRINT) printf("\tREMOVE: SUCCESS\n");
+							BrkErrAPI(  removeFile( file)  );								if(PRINT) printf("\tREMOVE: SUCCESS\n");
 							break;
 						}
 					if(PRINT) printf("\n");
@@ -420,6 +438,8 @@ int main (int argc, char **argv){
 		}
 		
 	ErrNEG1(  closeConnection(socketname)  );
+	
+	if(PRINT) printf("END: CLIENT FINISHED all TASKS and DISCONNECTED");
 	
 	ErrNEG1(  optQueueDestroy()  );
 	

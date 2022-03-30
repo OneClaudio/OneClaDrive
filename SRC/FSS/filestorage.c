@@ -106,6 +106,7 @@ int storageDestroy(){		//deallocates a STORAGE
 	
 	ErrERRNO(  pthread_rwlock_destroy(&storage->lock)  );
 	free(storage);
+	storage=NULL;
 	return 0;
 
 ErrCLEANUP
@@ -157,9 +158,8 @@ File* rmvLastFile(){				//rmvLastFile() removes the LAST file from STORAGE. The 
 										//the worker thread has the duty to destroy the file with fileDestroy()										
     File* victim=storage->last;
     	
-	if(storage->first==NULL) return NULL;		//if the STORAGE is EMPTY returns NULL
-
-	if(storage->first==storage->last){			//if victim is the ONLY FILE LEFT in the storage, the first and last are set to NULL (EMPTY state)
+	if(storage->last==NULL) return NULL;		//if the STORAGE is EMPTY returns NULL
+	else if(storage->first==storage->last){			//if victim is the ONLY FILE LEFT in the storage, the first and last are set to NULL (EMPTY state)
 		storage->first=NULL;
 		storage->last=NULL;
 		}
@@ -266,8 +266,7 @@ int main(){
 		if( f1->lockId==cid)
 			readfile(f1, &buf, &size);
 
-		printf("read from f1: %s\n", (char*)buf);	//TODO
-		
+		printf("read from f1: %s\n", (char*)buf);
 		free(buf);
 		
 		printf("cont of f1 intact: %s\n", (char*)f1->cont);

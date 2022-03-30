@@ -29,14 +29,27 @@
 #define WRLOCK(l)   ErrNZERO(  pthread_rwlock_wrlock(l)  );
 #define RWUNLOCK(l) ErrNZERO(  pthread_rwlock_unlock(l)  );
 
+	/*-------------------Config-(default)----------------------*/
+
+#define CONFIGMAXLINE (PATH_MAX+32)
+
+int maxNumFiles=100;
+size_t maxCapacity=64000000;	//64MB
+
 	/*-------------------------Log-----------------------------*/
 
-FILE* Log=NULL;
-pthread_mutex_t LogMutex;
+//#define DEBUG			//Uncomment to print log and dbg info to screen
 
+bool DBG=false;
+
+FILE* Log=NULL;
+pthread_mutex_t LogMutex=PTHREAD_MUTEX_INITIALIZER;
 		
 #define LOG(...)					\
-	{	printf(__VA_ARGS__);		\
+	{								\
+		if(DBG)						\
+			printf(__VA_ARGS__);	\
+									\
 		LOCK(&LogMutex);			\
 		fprintf( Log,__VA_ARGS__);	\
 		UNLOCK(&LogMutex);			\
@@ -44,10 +57,10 @@ pthread_mutex_t LogMutex;
 		}
 
 #define LOGOP( esit, file, sz)																								\
-	{	char size[8]="0";																									\
+	{	char size[20]="0";																									\
 		if(sz!=NULL) sprintf(size,"%zu", *(size_t*)sz );																	\
-		LOG( "WORK: CID=%-4d""%-7s""%-16s""%s %s""\t%s\n", cid, strCmdCode(cmd.code), strReply(esit), ( sz ? size : ""),	\
-		 													( sz ? "B" : ""), file ? file : ""  );							\
+		LOG( "WORK: CID=%-4d""%-7s""%-10s""%s %s""\t%s\n", cid, strCmdCode(cmd.code), strReply(esit), ( sz ? size : ""),	\
+		 													( sz ? "B" : "\t"), file ? file : ""  );							\
 		}
 
 	/*-------------------------Signals-------------------------*/
@@ -69,24 +82,6 @@ void  handleoff(int unused){
 	LOG("MAIN: HARD QUIT SIGNAL RECEIVED -> NO FURTHER REQUESTS WILL BE EXECUTED\n");
 	return; ErrCLEANUP ErrCLEAN
 	}
-	
-	/*-------------------Config-(default)----------------------*/
-
-#define LOGPATHN	"./serverlog.txt"
-#define SOCKETPATHN "./server_sol"
-#define MAXNUMFILES 100
-#define MAXCAPACITY 64000000  //64MB
-#define MAXWTHREADS 4
-#define BACKLOG 10
-
-#define CONFIGMAXLINE (PATH_MAX+32)
-
-char logpathn[PATH_MAX]=LOGPATHN;
-char socketpathn[PATH_MAX]=SOCKETPATHN;
-int maxNumFiles=MAXNUMFILES;
-size_t maxCapacity=MAXCAPACITY;
-int maxWThreads=MAXWTHREADS;
-int backlog=BACKLOG;
 
 	/*-------------------------Threads-------------------------*/
 
@@ -112,17 +107,14 @@ int backlog=BACKLOG;
 	WRITE( cid, &reply, sizeof(Reply) );	\
 	}
 
-#define TERMINATE -2
-#define DISCONN   -3
 
-pthread_t tid[MAXWTHREADS];		//WORKER THREADS
 
+#define TERMINATE -2		//CODE to TERMINATE each THREAD when the times come
 IdList* pending;	//Thread safe FIFO QUEUE holds CIDs ready for the WORKER threads					M -> WT
 
-//struct timespec emptysleep={ .tv_sec=0, .tv_nsec=50000000};  //Timer (50ms) for each thread to retry fetching a CID from PENDING queue
-
-#define FIFOPATHN	"./done"
+#define DISCONN   -3		//with this CODE a WORKER tellsto the MAIN that a CLIENT just DISCONNECTED
 int done=NOTSET;	//Named PIPE(also FIFO) holds CIDs that completed an OP but arent DISCONNECTING		M <- WT
+pthread_mutex_t DoneMutex=PTHREAD_MUTEX_INITIALIZER;
 
 Storage* storage;	//Data Structure that holds all FILES + RWLOCK to access them
 	
@@ -131,24 +123,29 @@ Storage* storage;	//Data Structure that holds all FILES + RWLOCK to access them
 
 // called by OPEN/WRITE/APPEND becaus they may trigger a CAP LIMIT, old file/s must be sent back to the CLIENT 
 int cacheAlg( int cid, Cmd cmd, size_t size){
-	while( storage->numfiles == MAXNUMFILES  ||  (storage->capacity+size) > MAXCAPACITY ){
-		REPLY(CACHE);
+
+	while( storage->numfiles>maxNumFiles || ((storage->capacity+size) > maxCapacity) ){
 		
 		File* victim=NULL;
-		ErrNULL( victim=rmvLastFile() );
+		victim=rmvLastFile();
+/*		storage->numfiles--;		// /!\ ALREADY CHECKED INSIDE RMVLASTFILE
+		storage->capacity-=size;			*/
+
+		if(victim==NULL) break;		//Edge case: the WRITE/APPEND needed to remove ALL FILES to make roome for the NEW one
 		
-		WRITE(cid, &victim->size, sizeof(size_t));
-		WRITE(cid, victim->cont, victim->size );
-		WRITE(cid, victim->name, PATH_MAX);
-		
-		storage->capacity-=size;
-		storage->numfiles--;
+		if( victim->cont!=NULL && victim->size>0){
+			REPLY(CACHE);			//The CACHE ALG asks CID to RECEIVE the FILE only if it's not EMPTY
+			WRITE(cid, &victim->size, sizeof(size_t));
+			WRITE(cid, victim->cont, victim->size );
+			WRITE(cid, victim->name, PATH_MAX);
+			}
 		
 		LOGOP(CACHE,victim->name, &victim->size);
 		fileDestroy( victim );
 		}
-//  REPLY(OK)	//the caller must respond OK to the client, which means that the replacement is complete
-				//	(each one has a slightly diff routine before replying)
+
+	REPLY(OK);
+	
 	SUCCESS    return  0;
 	ErrCLEANUP return -1; ErrCLEAN
 	}
@@ -156,6 +153,7 @@ int cacheAlg( int cid, Cmd cmd, size_t size){
 void* work(void* unused){				//ROUTINE of WORKER THREADS
 	
 	while(1){
+		ErrLOCAL;
 		bool Disconnecting=false;		//needed outside of the switch QUIT case, has to pass information that the CID is closing connection
 		
 		int cid=NOTSET;					//gets a ready ClientID (CID) from PENDING QUEUE
@@ -181,6 +179,8 @@ void* work(void* unused){				//ROUTINE of WORKER THREADS
 			
 		//RWUNLOCK(&storage->lock);	//----^^^^----
 		
+		if(DBG) printf("NUM F=%zu\n", storage->numfiles);
+		
 		switch(cmd.code){
 			
 			case OPEN: {
@@ -189,28 +189,30 @@ void* work(void* unused){				//ROUTINE of WORKER THREADS
 				if( cmd.info & O_CREATE ){	//Client requested an O_CREATE openFile()
 					if( f!=NULL){   REPLY(EXISTS); LOGOP(EXISTS,cmd.filename,NULL); break;	} //ERR: file already existing
 					ErrNULL(  f=fileCreate(cmd.filename)  );	//ERR:	fatal malloc error while allocating space for new file (ENOMEM)
-					ErrNEG1(  addNewFile(f)  );					//Successful CREATION	
+					ErrNEG1(  addNewFile(f)  );					//Successful CREATION
+					// addNEwFile() INCREMENTS NUMFILES
+					cmd.code=CREATE; LOGOP(OK,cmd.filename,NULL); cmd.code=OPEN;
 					}	
-				else{						//Client requested a normal openFile()
+				else{						//Client requested a normal openFile() on a file ALREADY PRESENT
 					if( f==NULL){   REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break;	} //ERR: file not already existing/not found
 					if( findId(f->openIds, cid) ){   REPLY(ALROPEN); LOGOP(ALROPEN,cmd.filename,NULL); break; } //ERR: cid already opened this file
 					}
 				
 				ErrNEG1(  enqId(f->openIds, cid)  );			//Successful OPEN
+				LOGOP(OK,cmd.filename,NULL);
 				
 				if( cmd.info & O_LOCK ){ 	//Client requested a O_LOCK openFile()
 											// mind that the the OPEN with LOCK doesnt HANG like its counterpart and returns IMMEDIATELY if unsuccessful
 					if( f->lockId!=NOTSET && f->lockId!=cid ){   REPLY(LOCKED); LOGOP(LOCKED,cmd.filename,NULL); break; }
 					else f->lockId=cid;							//Successful LOCK
+					cmd.code=LOCK; LOGOP(OK,cmd.filename,NULL); cmd.code=OPEN;
 					}
 					
-				REPLY(OK);   LOGOP(OK,cmd.filename,NULL);
+				REPLY(OK);
 				
 				ErrNEG1(  cacheAlg(cid, cmd, (size_t)0)  );		//CACHE ALG enclosed in function bc is reused with the same code elsewhere
 				
 				//RWUNLOCK(&storage->lock);	//----^^^^----
-				
-				REPLY(OK);
 				
 				} break;
 			
@@ -218,7 +220,7 @@ void* work(void* unused){				//ROUTINE of WORKER THREADS
 			case APPEND:			//		mainly because they all need to be LOCKED by the CLIENT to be successful
 			case REMOVE:			//      (and this implies that the FILE EXISTS in FSS and is OPEN by CID)
 			case UNLOCK: {
-				//RDLOCK(&storage->lock);		//----vvvv----
+				//RDLOCK(&storage->lock);	//----vvvv----
 
 				if( f==NULL){ REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }		//ERR: getFile() didnt FOUND it
 				
@@ -231,40 +233,41 @@ void* work(void* unused){				//ROUTINE of WORKER THREADS
 				switch(cmd.code){
 				
 					case WRITE:{
-						//RDLOCK(&storage->lock);		//----vvvv----
+						//RDLOCK(&storage->lock);	//----vvvv----
 															//ERR: WRITE can only be performed on a NEWLY CREATED (EMPTY) FILE
 						if( f->cont != NULL ){ REPLY(NOTEMPTY); LOGOP(EMPTY,cmd.filename,NULL); break; }
 						
 						//RWUNLOCK(&storage->lock);	//----^^^^----					
 						
 						REPLY(OK);
+						
 						size_t size=0;
 						READ(cid, &size, sizeof(size_t));
-						printf("size: %ld\n", size);
-				
-						void* cont=NULL;
-						ErrNULL( cont=calloc(1, size) );
-						READ(cid, cont, size);
+
 																	//ERR: if the incoming FILE cant FIT the WHOLE SPACE, it cannot be accepted in
-						if( size > MAXCAPACITY ){ 
+						if( size > maxCapacity ){ 
 							REPLY(TOOBIG);
 							LOGOP(TOOBIG,cmd.filename,NULL);
-							free(cont);		//Important to discard this file because its probably very big
-							break; }
-						
-
+							ErrNEG1(  rmvThisFile(f)  );			//The BIG FILE is already OPENED and LOCKED even if EMPTY, must be REMOVED
+							ErrNEG1(  fileDestroy(f)  );			//DEALLOCATES the REMOVED FILE
+							break;
+							}
+						else REPLY(OK);
 						
 						//WRLOCK(&storage->lock); 	//----vvvv----
 						
 						ErrNEG1( cacheAlg(cid,cmd,size)  );
 						
+						void* cont=NULL;
+						ErrNULL( cont=calloc(1, size) );
+						READ(cid, cont, size);
+						
 						f->size=size;				//Actual WRITE, storing in the FILE NODE the received CONTs
 						f->cont=cont;
-						storage->numfiles++;		//Updating STORAGE DIMENSIONS
-						storage->capacity+=size;
+						storage->capacity+=size;	//Updating STORAGE DIMENSIONS
 						
 						//RWUNLOCK(&storage->lock);	//----^^^^----
-				
+						
 						REPLY(OK);
 						size_t* s=&size;			
 						LOGOP(OK, cmd.filename, s);	//WARN: this threw 'always true' warning without this extra step
@@ -277,21 +280,29 @@ void* work(void* unused){				//ROUTINE of WORKER THREADS
 				
 						size_t size=0; 
 						READ(cid, &size, sizeof(size_t));
+						//WRLOCK(&storage->lock); 	//----vvvv----	//ERR: if the RESULTING FILE cant FIT the WHOLE SPACE the append must be canceled
+						if( (f->size + size) > maxCapacity ){
+							REPLY(TOOBIG);
+							LOGOP(TOOBIG,cmd.filename,NULL);
+							ErrNEG1(  rmvThisFile(f)  );			//The BIG FILE is already OPENED and LOCKED even if EMPTY, must be REMOVED
+							ErrNEG1(  fileDestroy(f)  );			//DEALLOCATES the REMOVED FILE
+							break;
+							}
+						else REPLY(OK);
+		
 				
+						ErrNEG1(  cacheAlg(cid,cmd,size)  );					
+						
 						void* buf=NULL;
 						ErrNULL( buf=calloc(1, size) );
 						READ(cid, buf, size);
-																	//ERR: if the RESULTING FILE cant FIT the WHOLE SPACE the append must be canceled
-						if( (f->size + size) > MAXCAPACITY ){
-							REPLY(TOOBIG);
-							LOGOP(TOOBIG,cmd.filename,NULL);
+						
+						if( f==NULL ){			//The CACHE ALGORITHM could have expelled the DEST FILE of the APPEND
+							REPLY(NOTFOUND);	//	if that's the case no sense in going on
+							LOGOP(NOTFOUND,cmd.filename,NULL);
 							free(buf);
 							break;
 							}
-				
-						//WRLOCK(&storage->lock); 	//----vvvv----
-				
-						ErrNEG1(  cacheAlg(cid,cmd,size)  );
 					
 						void* extendedcont=NULL;
 						ErrNULL(  extendedcont=realloc( f->cont, f->size+size)  );	//REALLOCATING OG FILE to fit the new CONTs
@@ -314,6 +325,7 @@ void* work(void* unused){				//ROUTINE of WORKER THREADS
 						//WRLOCK(&storage->lock); 	//----vvvv----
 						
 						ErrNEG1(  rmvThisFile(f)  );		//Already have all requirements, proceding with REMOVE
+						//storage->capacity-=size;			// /!\ ALREADY CHECKED INSIDE RMVLASTFILE
 						
 						//RWUNLOCK(&storage->lock);	//----^^^^----
 						
@@ -379,7 +391,7 @@ void* work(void* unused){				//ROUTINE of WORKER THREADS
 					}
 				} break;
 						
-			case (CLOSE):{
+			case CLOSE:{
 				//RDLOCK(&storage->lock);		//----vvvv----
 				if( f==NULL){   REPLY(NOTFOUND); LOGOP(NOTFOUND,cmd.filename,NULL); break; }		//ERR: file not found
 				//RWUNLOCK(&storage->lock);	//----^^^^----
@@ -393,7 +405,7 @@ void* work(void* unused){				//ROUTINE of WORKER THREADS
 				//RWUNLOCK(&storage->lock);	//----^^^^----
 				} break;		
 
-			case (READN):{
+			case READN:{
 				REPLY(OK);		//READN basically CANT FAIL by design (worst case scenario other than FATAL SC ERROR is that it reads 0 files)
 				
 				//RDLOCK(&storage->lock);		//----vvvv----
@@ -404,11 +416,12 @@ void* work(void* unused){				//ROUTINE of WORKER THREADS
 				int n_read=0;
 				
 				while( n_read < n ){	//for each of N RANDOM FILES
+					n_read++;									//increments READ COUNT
 					if( curr==NULL) break;										//If FSS is completely EMPTY get out
 					
 					if( curr->lockId!=NOTSET && curr->lockId!=cid ) continue;	//READN cannot read LOCKED files
 					
-					if( curr->cont==NULL ) continue;							//Also no sense in reading EMPTY files
+					if( curr->cont==NULL || curr->size<=0) continue;			//Also no sense in reading EMPTY files
 					
 					REPLY(ANOTHER);								//Tells the CLIENT that there's ANOTHER FILE to be READ
 					WRITE(cid, &curr->size, sizeof(size_t));
@@ -416,7 +429,6 @@ void* work(void* unused){				//ROUTINE of WORKER THREADS
 					WRITE(cid, curr->name, PATH_MAX);			//Must also send his NAME other than SIZE and CONT
 					
 					LOGOP(ANOTHER, curr->name , &curr->size);		
-					n_read++;									//increments READ COUNT
 					curr=curr->prev;							//CONTINUES TRAVERSING the LIST
 					}
 
@@ -428,8 +440,8 @@ void* work(void* unused){				//ROUTINE of WORKER THREADS
 				} break;			
 				
 	
-			case (IDLE):
-			case (QUIT):{
+			case IDLE:
+			case QUIT:{
 
 				//WRLOCK(&storage->lock);		//----vvvv----				
 				File* curr=storage->last;
@@ -457,31 +469,27 @@ void* work(void* unused){				//ROUTINE of WORKER THREADS
 		
 		if(Disconnecting){
 			LOG("WORK: CLIENT %d DISCONNECTED\n", cid);
+			ErrNEG1(  close(cid)  );
 			cid=DISCONN;						//A CODE is SENT back to the MAIN THREAD instead of the DISCONNECTED CLIENT ID
 			}									//		(decrements the number of active clients in main)
-
-		WRITE( done, &cid, sizeof(int) );		//if it isnt DISCONNECTING the CLIENT ID is SENT BACK to the MAIN THREAD
 		
-		printf("STORAGE:  ----------------------------\n");		//DBG: Prints the list of FILES currently in the FSS
-		storagePrint();
-		printf("--------------------------------------\n\n");
+		LOCK(&DoneMutex);
+		WRITE( done, &cid, sizeof(int) );		//if it isnt DISCONNECTING the CLIENT ID is SENT BACK to the MAIN THREAD
+		UNLOCK(&DoneMutex);
+		
+		if(DBG){
+			printf("STORAGE:  ----------------------------\n");		//DBG: Prints the list of FILES currently in the FSS
+			storagePrint();
+			printf("--------------------------------------\n\n");
+			}
 		fflush(stdout);
+		continue;
+	ErrCLEANUP 
+		REPLY(FATAL); 
+		kill(0, SIGINT);
+	ErrCLEAN
 		}
-
-	SUCCESS    return NULL;
-	ErrCLEANUP return NULL; ErrCLEAN
-	}
-
-int spawnworker(){								//worker threads SPAWNER
-	for(int i=0; i<MAXWTHREADS; i++){
-		CREATE(&tid[i], NULL, work, NULL );		//WORKER THREAD
-		LOG("MAIN: CREATED WORKER THREAD #%d\n", i);
-		}
-
-	return 0;
-ErrCLEANUP
-	return -1;
-ErrCLEAN
+	return NULL;
 	}
 	
 /*-----------------------------------------------------MAIN----------------------------------------------------------*/	
@@ -506,28 +514,18 @@ int main(int argc, char* argv[]){
 	off.sa_mask=soft.sa_mask=mask;					//blocks signals inside SIG HANDLER function
 	
 	ErrNEG1(  sigaction(SIGINT,  &off, NULL)  );				//assigns each SIG to the its SIG HANDLER
-	ErrNEG1(  sigaction(SIGQUIT,&soft, NULL)  );	// /!\ temp quit in softquit bc it has a keyboard shortcut
+	ErrNEG1(  sigaction(SIGQUIT, &off, NULL)  );
 	ErrNEG1(  sigaction(SIGHUP, &soft, NULL)  );
 	
-	/*-------------------------Log-----------------------------*/
-	
-//	FILE* Log=NULL;  moved to global
-	ErrNULL(  Log=fopen( LOGPATHN, "w")  );
-//  pthread_mutex_t LogMutex;
-	ErrERRNO(  pthread_mutex_init(&LogMutex, NULL)  );
-	
 	/*------------------------Config---------------------------*/
-	if(argc==1){		//CONFIG FILE NOT SPECIFIED
-		LOG("WARN: CONFIG FILE MISSING -> DEFAULT PARAMETERS LOADED\n");
-		printf("\nLOGPATHN=%s\nSOCKETPATHN=%s\nMAXNUMFILES=%d\nMAXCAPACITY=%zu\nMAXWTHREADS=%d\nBACKLOG=%d\n\n", 	\
-						logpathn,       socketpathn,    maxNumFiles,    maxCapacity,    maxWThreads, backlog);
-		}
-	else if(argc>2){	//more than 1 ARG
-		LOG("ERR: TOO MANY ARGUMENTS -> SHUTDOWN");
-		fprintf(stderr, "Error: Only 1 argument allowed, the PATHNAME of the CONFIG FILE\n");
-		ErrSHHH;
-		}
-	else if(argc==2){	//CONFIG FILE SPECIFIED
+	
+	char socketpathn[PATH_MAX]="./serversocket";
+	char fifopathn[PATH_MAX]=  "./serverdone";
+	char logpathn[PATH_MAX]=   "./serverlog.txt";
+	int maxWThreads=4;
+	int backlog=32;
+	
+	if(argc==2){	//CONFIG FILE SPECIFIED
 		char* configpathn=argv[1];
 		FILE* config=NULL;
 		ErrNULL(  config=fopen(configpathn, "r")  );
@@ -536,19 +534,35 @@ int main(int argc, char* argv[]){
 		
 		while( fgets(line, CONFIGMAXLINE, config) != NULL ){
 			char dummy[CONFIGMAXLINE]={'\0'};
-			if( sscanf(line, " %s", dummy) == EOF) continue;	// blank line
-			if( sscanf(line, " %[#]", dummy) == 1) continue;	// comment
-			if( sscanf(line, " LOGPATHN = %s",        logpathn ) !=0 ) continue;
-			if( sscanf(line, " SOCKETPATHN = %s",  socketpathn ) !=0 ) continue;
+			if( sscanf(line, " %s",   dummy )==EOF) continue;	// blank line
+			if( sscanf(line, " %[#]", dummy )==1  ) continue;	// comment
+			if( sscanf(line, " SOCKETPATHNAME = %s",socketpathn) !=0 ) continue;
+			if( sscanf(line, " FIFOPATHNAME = %s",    fifopathn) !=0 ) continue;
+			if( sscanf(line, " LOGPATHNAME = %s",     logpathn ) !=0 ) continue;
 			if( sscanf(line, " MAXNUMFILES = %d", &maxNumFiles ) !=0 ) continue;
 			if( sscanf(line, " MAXCAPACITY = %zu",&maxCapacity ) !=0 ) continue;
 			if( sscanf(line, " MAXWTHREADS = %d", &maxWThreads ) !=0 ) continue;
 			if( sscanf(line, " BACKLOG = %d",         &backlog ) !=0 ) continue;
-			LOG("WARN: UNKNOWN CONFIG FILE PARAMETER -> IGNORED\n");
+			fprintf(stderr, "Warning: Unknown config file parameter, skipped\n");
 			}
-		printf("\nLOGPATHN=%s\nSOCKETPATHN=%s\nMAXNUMFILES=%d\nMAXCAPACITY=%zu\nMAXWTHREADS=%d\nBACKLOG=%d\n\n", 	\
-						logpathn,       socketpathn,    maxNumFiles,    maxCapacity,    maxWThreads, backlog);
+		ErrNZERO(  fclose(config)  )
 		}
+	else if(argc>2){	//more than 1 ARG
+		fprintf(stderr, "Error: Only 1 argument allowed, the PATHNAME of the CONFIG FILE\n");
+		ErrSHHH;
+		}
+	
+		/*-------------------------Log-----------------------------*/
+	
+	#ifdef DEBUG
+	DBG=true;
+	#endif
+	
+	//FILE* Log=NULL;  			//GLOBAL
+	ErrNULL(  Log=fopen( logpathn, "w")  );
+	
+	LOG("LOGPATHNAME=%s\nFIFOPATHNAME=%s\nSOCKETPATHNAME=%s\nMAXNUMFILES=%d\nMAXCAPACITY=%zu\nMAXWTHREADS=%d\nBACKLOG=%d\n\n", 	\
+					logpathn,		fifopathn,       socketpathn,    	maxNumFiles,    maxCapacity,    maxWThreads, backlog);
 	
 	/*------------------------Socket---------------------------*/
 	int sid=NOTSET;
@@ -557,24 +571,26 @@ int main(int argc, char* argv[]){
 	struct sockaddr_un saddr;							//saddr: server address, needed for BIND
 	memset(&saddr, 0, sizeof(saddr));
 	saddr.sun_family=AF_UNIX;							//adds domain and pathname to the server address structure
-	strcpy(saddr.sun_path, SOCKETPATHN);				
+	strcpy(saddr.sun_path, socketpathn);
+	
+	fprintf(stderr, "SOCKETNAME: %s\n", socketpathn);				
 	
 	ErrNEG1(  bind(sid, (struct sockaddr*) &saddr, SUN_LEN(&saddr))  );	//BIND: NAMING of the opened socket
 	
-	ErrNEG1( listen(sid, BACKLOG)  );							//sets socket in LISTEN mode
+	ErrNEG1( listen(sid, backlog)  );							//sets socket in LISTEN mode
 	
 	LOG("MAIN: SOCKET OPENED\n");
 	
 	/*-------------------Pending-queue/Done-pipe---------------*/
 	ErrNULL(  pending=idListCreate()  );				//PENDING queue
 	
-	if( mkfifo(FIFOPATHN, 0777) != 0){				//DONE named pipe
+	if( mkfifo(fifopathn, 0777) != 0){				//DONE named pipe
 		if( errno != EEXIST){
 			perror("Error: couldnt create named pipe\n");
 			ErrSHHH;
 			}
 		}
-	ErrNEG1(  done=open(FIFOPATHN, O_RDWR)  );
+	ErrNEG1(  done=open(fifopathn, O_RDWR)  );
 	
 	/*-------------------------FD-sets-------------------------*/
 	fd_set all, rdy;								//ALL set of FDs controlled by select()
@@ -589,8 +605,14 @@ int main(int argc, char* argv[]){
 	/*---------------------FSS-/-Threads-----------------------*/	
 	
 	ErrNEG1(  storageCreate()  );		//allocates an empty FILE STORAGE
-	
-	ErrNEG1(  spawnworker()  );			//spawns WORKER THREADS
+		
+	pthread_t* tid=NULL;				//allocated ARRAY that holds THREAD IDs
+	ErrNULL(  tid=malloc( (maxWThreads+1)*sizeof(pthread_t))  );
+		
+	for(int i=0; i<maxWThreads; i++){
+		CREATE(&tid[i], NULL, work, NULL );		//WORKER THREAD CREATION
+		LOG("MAIN: CREATED WORKER THREAD #%d\n", i);
+		}
 
 	LOG("MAIN: SERVER READY\n");
 	
@@ -616,7 +638,11 @@ int main(int argc, char* argv[]){
 						}
 					else if( i==done){			//the named pipe containing the finished requests has a cid that must return in the controlled set
 						int cid;
+						
+						LOCK(&DoneMutex);
 						READ(done, &cid, sizeof(int));
+						UNLOCK(&DoneMutex);
+						
 						if( cid==DISCONN ){
 							activeCid--;
 							}
@@ -630,40 +656,45 @@ int main(int argc, char* argv[]){
 					}
 				}
 			}
+		//LOG("MAIN:\t\t\tNCID:%d\n", activeCid);
 		if( Status==SOFT && activeCid==0) break; 
 		}
 
-	for( int i=0; i<MAXWTHREADS; i++)
+	/*---------------------Cleanup-----------------------------*/
+
+	for( int i=0; i<maxWThreads; i++)
 		enqId(pending, TERMINATE);
 		
-	for( int i=0; i<MAXWTHREADS; i++){
+	for( int i=0; i<maxWThreads; i++){
 		ErrERRNO(  pthread_join( tid[i], NULL)  );
 		LOG("MAIN: THREAD #%d JOINED\n", i);
 		}
+	free(tid);
+	
+	printf("SOCKET NAME: %s\n", socketpathn);
+	printf("DONE   NAME: %s\n", fifopathn);
 	
 	ErrNEG1(  storageDestroy()       );
-	WRITE(done, &done, sizeof(int)   );
-	ErrNEG1(  unlink(FIFOPATHN)      );
+	ErrNEG1(  unlink(fifopathn)      );
 	ErrNEG1(  close(done)            );
 	ErrNEG1(  idListDestroy(pending) );
-	ErrNEG1(  unlink(SOCKETPATHN)    );
+	ErrNEG1(  unlink(socketpathn)    );
 	ErrNEG1(  close(sid)             );
 	LOG("MAIN: SERVER SUCCESSFULLY CLOSED\n");
-	ErrERRNO(  pthread_mutex_destroy(&LogMutex) );
 	ErrNZERO(  fclose(Log)  );
 	return 0;
 	
 ErrCLEANUP
+	fflush(stderr);
 	if(storage) storageDestroy();
-	unlink(FIFOPATHN);
+	unlink(fifopathn);
 	if(done!=NOTSET) close(done);
 	if(pending) idListDestroy(pending);
-	unlink(SOCKETPATHN);
+	unlink(socketpathn);
 	if(sid!=NOTSET) close(sid);
 	LOG("MAIN: SERVER ERROR (CLEANUP DONE)\n");
-	pthread_mutex_destroy(&LogMutex);
 	fflush(Log);
-	if(Log) fclose(Log);
+	if(Log!=NULL) fclose(Log);
 	exit(EXIT_FAILURE);
 ErrCLEAN
 	}

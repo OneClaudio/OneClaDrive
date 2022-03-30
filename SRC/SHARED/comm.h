@@ -2,7 +2,8 @@
 #include <linux/limits.h>	//PATH_MAX
 
 typedef enum CmdCode{
-	IDLE    ,
+	IDLE    ,	//not in API
+	CREATE  ,	//not in API
 	OPEN	,
 	CLOSE	,
 	WRITE	,
@@ -12,12 +13,13 @@ typedef enum CmdCode{
 	LOCK	,
 	UNLOCK	,
 	REMOVE	,
-	QUIT
+	QUIT		//not in API
 	} CmdCode;
-	
+
 char* strCmdCode(CmdCode cmd){
 	switch(cmd){
-		case IDLE: 	return "IDLE";
+		case IDLE: 	return "IDLE";		//not in API
+		case CREATE:return "CREATE";	//not in API
 		case OPEN: 	return "OPEN";
 		case CLOSE: return "CLOSE";
 		case WRITE: return "WRITE";
@@ -27,10 +29,19 @@ char* strCmdCode(CmdCode cmd){
 		case LOCK:	return "LOCK";
 		case UNLOCK:return "UNLOCK";
 		case REMOVE:return "REMOVE";
-		case QUIT: 	return "QUIT";
+		case QUIT: 	return "QUIT";		//not in API
 		}
 	return NULL;
 	}
+	
+#define	O_CREATE 0x1
+#define O_LOCK	 0x2
+
+typedef struct {
+	CmdCode code;
+	int info;		//'open' flags   or   number of files in readn/cache alg
+	char filename[PATH_MAX];
+	} Cmd;
 
 typedef enum Reply{
 	OK		   ,
@@ -45,7 +56,8 @@ typedef enum Reply{
 	ALRLOCKED  ,
 	EMPTY	   ,
 	NOTEMPTY   ,
-	TOOBIG
+	TOOBIG     ,
+	FATAL
 	} Reply;
 
 char* strReply(Reply reply){
@@ -63,15 +75,7 @@ char* strReply(Reply reply){
 		case EMPTY: 	return "EMPTY";
 		case NOTEMPTY: 	return "NOTEMPTY";
 		case TOOBIG: 	return "TOOBIG";
+		case FATAL:		return "FATAL";
 		}
 	return NULL;
-	}	
-	
-#define	O_CREATE 0x1
-#define O_LOCK	 0x2
-
-typedef struct {
-	CmdCode code;
-	int info;		//'open' flags   or   number of files in readn/cache alg
-	char filename[PATH_MAX];
-	} Cmd;
+	}

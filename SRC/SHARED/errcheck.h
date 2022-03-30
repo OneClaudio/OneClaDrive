@@ -66,7 +66,7 @@
 			}																				\
 		}
 
-#define ErrFAIL						/*Always FAILS   Only prints ERR MSG		*/										\
+#define ErrFAIL							/*Always FAILS   Only prints ERR MSG		*/										\
 	{	fprintf(stderr,"ERROR: by %s (%s:%d)\t%s (ERRNO=%d)\n",__func__, __FILE__, __LINE__, strerror(errno), errno);	\
 		goto ErrCleanup;																								\
 		}

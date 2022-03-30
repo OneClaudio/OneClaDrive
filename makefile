@@ -1,6 +1,7 @@
 CC=      gcc
 LIBS=   -pthread
 CFLAGS= -std=gnu99 -g -Wall -D_GNU_SOURCE #-Wextra -pedantic
+DBGFLAG=-DDEBUG
 #OPTFLAGS= -O3
 
 INC_SH=  -I$(SHAREDDIR)
@@ -39,6 +40,7 @@ $(APIDIR)/libAPI.a: $(APIDIR)/api.o
 	ar -rc $@ $<
 
 BIN= ./BIN
+TEST= ./TEST
 
 server: $(SERVER_O) 
 	$(CC) $(CFLAGS) $(LIBS) $^ -o $@
@@ -50,18 +52,36 @@ client: $(CLIENT_O) $(APIDIR)/libAPI.a
 
 
 
-.PHONY: clean cleanall test1
+.PHONY: clean cleanall test1 test2
 
 clean:
-	rm -f $(SOBJDIR)/*.o  $(COBJDIR)/*.o
+	rm -f $(SOBJDIR)/*.o  $(COBJDIR)/*.o $(APIDIR)/*.o $(APIDIR)/*.a
 
 cleanall:	
 	rm -rf $(BIN)/READ
 	rm -rf $(BIN)/TRASH
 	
-test1:
-	$(BIN)/server $(TEST)/config1.txt
-	@chmod +x $(TEST)/test1.sh
-	$(TEST)/test1.sh
+	
 
+#xfce4-terminal --working-directory=.  --command="valgrind --leak-check=full $(BIN)/server $(TEST)/config1.txt)"
+test1: client server
+	valgrind --leak-check=full $(BIN)/server $(TEST)/config1.txt &
+	chmod +x $(TEST)/test1.sh
+	$(TEST)/test1.sh
+	sleep 3
+	pkill -HUP -f $(BIN)/server
+
+test2: client server
+	$(BIN)/server $(TEST)/config2.txt &
+	chmod +x $(TEST)/test2.sh
+	$(TEST)/test2.sh
+	sleep 3
+	pkill -HUP -f $(BIN)/server
+	
+test3: client server
+	$(BIN)/server $(TEST)/config3.txt &
+	chmod +x $(TEST)/test3.sh
+	$(TEST)/test3.sh
+	sleep 3
+	pkill -INT -f $(BIN)/server
 

@@ -104,8 +104,13 @@ static void errReply( Reply r, const char* pathname){
 			break;
 		
 		case(TOOBIG):
-			fprintf(stderr, "Logic: The file '%s' is LARGER than the current FSS CAPACITY\n", pathname);
+			fprintf(stderr, "Logic: The file '%s' would become LARGER than the current FSS CAPACITY\n", pathname);
 			errno=EFBIG;
+			break;
+		
+		case(FATAL):
+			fprintf(stderr, "Error: FATAL or NOT NEGLIGIBLE ERROR inside FSS\n");
+			errno=ESHUTDOWN;
 			break;
 			
 		default:
@@ -139,61 +144,28 @@ ErrCLEAN
 
 	}
 
-static int SENDfile(const char* pathname){
-	
-	FILE* file=NULL;
-	ErrNULL(  file=fopen(pathname, "rb")	 );			//ERR: file not found or other (fopen SETS ERRNO)
-
-    struct stat filestat;
-    ErrNEG1(  stat(pathname, &filestat)  );			//ERR: filestat corrupted	(stat SETS ERRNO)
-	
-	size_t size=filestat.st_size;
-	//printf("size: %d\n", size);
-	
-	void* cont=NULL;
-	ErrNULL(  cont=calloc(1, size)  );				//ERR: malloc failure (malloc SETS ERRNO=ENOMEM)
-	
-	FREAD(cont, size, 1, file);						//ERR: file read failure (freadfull SETS ERRNO=EIO)
-	fflush(file);
-	
-
-	WRITE(sid, &size, sizeof(size_t));
-	WRITE(sid, cont, size);							//ERR: write error while sending data to server
-	
-	if(PRINT) printf("\t %zuB WRITTEN\n", size);
-	
-SUCCESS
-	fclose(file);
-	free(cont);	
-	return 0;
-
-ErrCLEANUP
-	if(file) fclose(file);
-	if(cont) free(cont);
-	return -1;
-ErrCLEAN
-	}
-
-/** @brief	used by READN to receive an UNKNOWN file
+/*			used by READN to receive an UNKNOWN file
  *			used by OPEN, WRITE, APPEND to receive an UNKNOWN file triggered by CACHE ALG. ejection
  */
 static int RECVfile(const char* savedir){
-	char * pathname=NULL;
 	size_t size=0;
 	void* cont=NULL;
+	char* pathname=NULL;
 		
 	READ( sid, &size, sizeof(size_t) );
-	ErrNULL(  cont=malloc( size)  );				//ERR: malloc failure (sets ERRNO=ENOMEM)	
+	
+	ErrNULL(  cont=calloc(1, size)  );				//ERR: malloc failure (sets ERRNO=ENOMEM)	
 	READ( sid, cont, size);
-	ErrNULL(  pathname=malloc(PATH_MAX) );			//ERR: ...
+	
+	ErrNULL(  pathname=calloc(1, PATH_MAX) );		//ERR: ...
 	READ( sid, pathname, PATH_MAX);					//an extra READ is needed from SERVER to get the file PATHNAME (+sets a flag to remember this)
 	
-	if(PRINT) printf("%s\t %zuB READ\n", pathname, size);
+	if(PRINT){ printf("%s\t %zuB READ\n", pathname, size); fflush(stdout); }
 	
 	if( savedir!=NULL )				//if a TRASH/SAVE DIR has been specified the file gets written in a file in it	
 		ErrNEG1(  SAVEfile( cont, size, pathname, savedir)  );
 
-	free(cont);
+	free(cont);			//if SAVEfile triggered these are already freed
 	free(pathname);
     return 0;
     
@@ -214,7 +186,6 @@ static int CACHEretrieve( const char* trashdir){
 			if(PRINT) printf("CACHE: RECEIVING FILE ");
 			ErrNEG1(  RECVfile(trashdir)  );
 			}
-		//else errReply(reply, "unknown");
 		}
 SUCCESS
 	return 0;
@@ -258,7 +229,7 @@ int SAVEfile(void* cont, size_t size,const char* pathname, const char* savedir){
 		return -1;
 		}
 
-	FILE* file=NULL;
+	FILE* filew=NULL;
 
 	char* altname=strdupa(pathname);
 	for( int i=0; i<strlen(altname); i++)			// pathname: ./home/spock/sol/kirk.txt  ->  altfname: f-home-spock-sol-kirk.txt
@@ -279,15 +250,17 @@ int SAVEfile(void* cont, size_t size,const char* pathname, const char* savedir){
 	strcat( finalpathname, "/");
 	strcat( finalpathname, altname);	
 	
-	ErrNULL(  file=fopen( finalpathname, "wb")  );
-	FWRITE( cont, size, 1, file);
-	fflush(file); /* fsync(fileno(file)); */
+	ErrNULL(  filew=fopen( finalpathname, "wb")  );
+	FWRITE( cont, size, 1, filew);
+	fflush(filew); /* fsync(fileno(filew)); */		
+	
+	// /!\ free(cont) is responsibility of the caller
 
 SUCCESS
-	fclose(file);
+	fclose(filew);
 	return 0;
 ErrCLEANUP
-	if(file) fclose(file);
+	if(filew) fclose(filew);
 	return -1;
 ErrCLEAN
 	}
@@ -312,14 +285,47 @@ int closeFile( const char* pathname){
 	
 
 int writeFile( const char* pathname, const char* trashdir ){
+	FILE* filer=NULL;
+	void* cont=NULL;
+	
 	ErrREPL(  firstCMDREPLY( WRITE, pathname, 0)  );
-	ErrNEG1(  SENDfile( pathname)  );
-	ErrNEG1(  CACHEretrieve( trashdir)  );
 
-SUCCESS	
+
+    struct stat filestat;
+    ErrNEG1(  stat(pathname, &filestat)  );			//ERR: filestat corrupted	(stat SETS ERRNO)
+	size_t size=filestat.st_size;
+	WRITE(sid, &size, sizeof(size_t));				//SEND SIZE
+	
+	Reply reply;
+	READ( sid, &reply, sizeof(Reply));				//ERR: SETS ERRNO
+	if( reply!=OK ){
+		errReply( reply, pathname);					//ERR: PRINTS ERR and SETS ERRNO
+		ErrSHHH;
+		}
+		
+	ErrNEG1(  CACHEretrieve( trashdir)  );			//EVENTUAL LOOP of CACHE RETRIEVAL
+	
+	ErrNULL(  filer=fopen(pathname, "rb")	 );		//ERR: file not found or other (fopen SETS ERRNO)
+	ErrNULL(  cont=calloc(1, size)  );				//ERR: malloc failure (malloc SETS ERRNO=ENOMEM)
+	FREAD(cont, size, 1, filer);						//ERR: file read failure (freadfull SETS ERRNO=EIO)
+	fclose(filer);
+	WRITE(sid, cont, size);
+	
+	READ( sid, &reply, sizeof(Reply));				//ERR: SETS ERRNO
+	if( reply!=OK ){
+		errReply( reply, pathname);					//ERR: PRINTS ERR and SETS ERRNO
+		ErrSHHH;
+		}
+	
+	if(PRINT){ printf("\t %zuB WRITTEN\n", size); fflush(stdout); }
+
+SUCCESS
+	free(cont);	
 	return 0;
 
 ErrCLEANUP
+	if(filer) fclose(filer);
+	if(cont) free(cont);
 	return -1;
 ErrCLEAN
 	}
@@ -329,12 +335,26 @@ int appendToFile( const char* pathname, void* buf, size_t size, const char* tras
 	ErrREPL(  firstCMDREPLY( APPEND, pathname, 0)  );
 	
 	WRITE(sid, &size, sizeof(size_t));
-	WRITE(sid, buf, size);
+	
+	Reply reply;
+	READ( sid, &reply, sizeof(Reply));				//ERR: SETS ERRNO
+	if( reply!=OK ){
+		errReply( reply, pathname);					//ERR: PRINTS ERR and SETS ERRNO
+		ErrSHHH;
+		}
 	
 	ErrNEG1(  CACHEretrieve( trashdir)  );
+	
+	WRITE(sid, buf, size);
+	
+	READ( sid, &reply, sizeof(Reply));				//ERR: SETS ERRNO
+	if( reply!=OK ){
+		errReply( reply, pathname);					//ERR: PRINTS ERR and SETS ERRNO
+		ErrSHHH;
+		}
 
-	return 0;	//SUCCESS
-
+SUCCESS
+	return 0;
 ErrCLEANUP
 	return -1;
 ErrCLEAN
@@ -353,13 +373,13 @@ int readFile( const char* pathname, void** buf, size_t* sz /*,const char* readdi
 	void* cont=NULL;
 		
 	READ( sid, &size, sizeof(size_t) );
-	ErrNULL(  cont=malloc( size)  );				//ERR: malloc failure (sets ERRNO=ENOMEM)	
+	ErrNULL(  cont=calloc(1, size)  );				//ERR: malloc failure (sets ERRNO=ENOMEM)	
 	READ( sid, cont, size);	
 
     *buf=cont;							//the received file gets passed to the client trough these PTRs
     *sz=size;							//the user of the API has the duty to free CONT's memory
+	// /!\ NO FREE otherwise the CLIENT doesnt receives data in BUF
 	
-	free(cont);
 	return 0;
 
 ErrCLEANUP
@@ -371,7 +391,10 @@ ErrCLEAN
 int readNFiles( int n, const char* readdir){
 	int read=0;							//stores the count of READ files
 	
-	if( readdir==NULL)	return read;	//not much sense in requesting n reads if there is no READDIR specified to save all the files
+	if( readdir==NULL){
+		fprintf(stderr,"Warning: Trying to call readFiles() without \n");
+		return read;	//not much sense in requesting n reads if there is no READDIR specified to save all the files
+		}
 		
 	ErrREPL(  firstCMDREPLY( READN, "", n)  );
 	
@@ -383,9 +406,9 @@ int readNFiles( int n, const char* readdir){
 		else if( reply==ANOTHER){
 			if(PRINT) printf("\tRECEIVING FILE ");
 			ErrNEG1(  RECVfile(readdir)  );
-			read++;
 			}
 		else errReply(reply, "unknown");
+		read++;
 		}
 SUCCESS
     return read;
@@ -415,8 +438,9 @@ int lockFile(const char* pathname){
 		WRITE( sid, &cmd, sizeof(Cmd));			//ERR: SETS ERRNO
 	
 		READ( sid, &reply, sizeof(Reply));		//ERR: SETS ERRNO
+		//if(reply=LOCKED) usleep(50000);
 	
-	} while( /* opt sleep */ reply==LOCKED );
+	} while( reply==LOCKED );
 	
 	if( reply == OK ) return 0;				//OK!
 	else{
@@ -434,9 +458,9 @@ int unlockFile(const char* pathname){
 	return firstCMDREPLY( UNLOCK, pathname, 0);
 	}
 	
-int openConnection(const char* sockname, int msec, const struct timespec abstime){
+int openConnection(const char* socketname, int msec, const struct timespec abstime){
 	
-	if( sockname==NULL || msec<0 || abstime.tv_sec<0 || abstime.tv_nsec<0 ){
+	if( socketname==NULL || msec<0 || abstime.tv_sec<0 || abstime.tv_nsec<0 ){
 		errno=EINVAL;
 		return -1;
 		}
@@ -450,10 +474,10 @@ int openConnection(const char* sockname, int msec, const struct timespec abstime
 	
 	struct sockaddr_un saddr;
 	memset(&saddr, 0, sizeof(saddr));
-	saddr.sun_family=AF_UNIX;							//specify the domain (AF_UNIX) and the path (sockname) of the SOCKET
-	strncpy(saddr.sun_path, sockname, strlen(sockname));
+	saddr.sun_family=AF_UNIX;							//specify the domain (AF_UNIX) and the path (socketname) of the SOCKET
+	strncpy(saddr.sun_path, socketname, strlen(socketname));
 	
-	connsocket=strdup(sockname);
+	connsocket=strdup(socketname);
 	
 	bool connected=false;
 	
@@ -486,16 +510,16 @@ int openConnection(const char* sockname, int msec, const struct timespec abstime
 	ErrCLEANUP return -1; ErrCLEAN
 	}
 
-int closeConnection(const char* sockname){
+int closeConnection(const char* socketname){
 	
 	CHKCONN(sid);
 
-	if( sockname==NULL){
+	if( socketname==NULL){
 		errno=EINVAL;
 		return -1;
 		}
 	
-	if( strcmp( sockname, connsocket ) !=0 ){
+	if( strcmp( socketname, connsocket ) !=0 ){
 		fprintf(stderr, "Error: trying to close a different socket\n");
 		errno=EBADF;
 		return -1;
@@ -512,35 +536,6 @@ int closeConnection(const char* sockname){
 											
 ErrCLEANUP
 	if(connsocket) free(connsocket);
-	return -1;
-ErrCLEAN
-	}
-	
-int ezOpen(const char* sockname){
-	
-	if( sockname==NULL){
-		errno=EINVAL;
-		return -1;
-		}
-	
-	if( sid != -1 ){
-		errno=EISCONN;
-		return -1;
-		}
-	
-	ErrNEG1(  sid=socket(AF_UNIX, SOCK_STREAM, 0)  );	//socket() assigns a free channel to sid (Server ID) 
-	
-	struct sockaddr_un saddr;
-	memset(&saddr, 0, sizeof(saddr));
-	saddr.sun_family=AF_UNIX;							//specify the domain (AF_UNIX) and the path (sockname) of the SOCKET
-	strncpy(saddr.sun_path, sockname, strlen(sockname));
-	
-	connsocket=strdup(sockname);
-	
-	ErrNEG1( connect( sid, (struct sockaddr *)&saddr, SUN_LEN(&saddr))  );
-	return 0;
-	
-ErrCLEANUP
 	return -1;
 ErrCLEAN
 	}
